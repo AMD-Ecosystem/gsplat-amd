@@ -1,95 +1,124 @@
-# gsplat for ROCm
+# GSplat for ROCm
 
-gsplat is an open-source library for GPU  accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
+**GSplat** is an open-source library for GPU-accelerated rasterization of Gaussians with Python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
 
-This repo is the HIP port of the gsplat repo which is enabled and optimised for RCOM runing on AMD Instinct processors. 
+This repository is the HIP port of the original `GSplat` project, optimized for **ROCm**, and designed to run on AMD Instinct™ GPUs. 
 
 ## System Requirements
-GSPLAT  for AMD ROCm™ 1.5.3 depends directly on NumPy and PyTorch for AMD ROCm™ with many optional dependencies
 
-- OS : Ubuntu 22.04 and Ubuntu 24.04
-- ROCM Versions 6.4 and 7.0
-- GPU Platforms : MI300, MI325, and MI350
-- Pytorch: 2.6, 2.7, and 2.8
-- Python : 3.12 and above.
-  
+To use GSplat, you need the following prerequisites:
+
+- **ROCm**: version 6.4.3, 7.0.0 (recommended)
+- **Operating system**: Ubuntu 22.04, 24.04  
+- **GPU platform**: AMD Instinct™ MI300X  
+- **PyTorch**: version 2.6, 2.8 (ROCm-enabled)  
+- **Python**: version 3.10, 3.12  
+
 ## Installation
 
- - Install [Pytorch](https://pytorch.org/get-started/locally/) first. The easiet way is the use the official docker image which has pytorch for ROCm.
+1. Install PyTorch (with ROCm support).  
+   The easiest method is using the official ROCm PyTorch Docker image:
 
-   Rocm 6.4
-    ```bash
-    docker run --cap-add=SYS_PTRACE --ipc=host --privileged=true   --shm-size=128GB --network=host --device=/dev/kfd  --device=/dev/dri --group-add video -it   -v $HOME:$HOME --name rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.6.0
- 
-    ```
-
-   Rocm 7.0
    ```bash
-   docker run --cap-add=SYS_PTRACE --ipc=host --privileged=true   --shm-size=128GB --network=host --device=/dev/kfd  --device=/dev/dri --group-add video -it   -v $HOME:$HOME --name rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
+   docker pull rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
    ```
- 
-- Install the gsplat from the AMD hosted PYPI repoitory.
 
-    ```bash
-    pip install gsplat --extra-index-url=https://pypi.amd.com/simple
-    ```
-- Once the installation is sucessful, you can verify the installation using the pip show command
-  ```bash
-    pip show gsplat
-  ```
+2. Launch and connect to the container:
+
+   ```bash
+   docker run --cap-add=SYS_PTRACE --ipc=host --privileged=true      --shm-size=128GB --network=host      --device=/dev/kfd --device=/dev/dri      --group-add video -it -v $HOME:$HOME      --name rocm_pytorch rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
+   ```
+
+3. Install GSplat from the AMD-hosted PyPI repository:
+
+   ```bash
+   pip install gsplat --index-url=https://pypi.amd.com/simple
+   ```
+
+4. Verify the installation:
+
+   ```bash
+   pip show gsplat
+   ```
+
+5. The output should show as follows:
+
+   ```bash
+   Name: gsplat
+   Version: 1.5.3+fec758f
+   Summary: Python package for differentiable rasterization of Gaussians
+   Home-page: https://github.com/rocm/gsplat
+   Author: AMD Corporation
+   License: Apache 2.0
+   Location: /opt/conda/envs/py_3.12/lib/python3.12/site-packages
+   Requires: jaxtyping, ninja, numpy, rich, torch
+
 
 ## Examples
 
-We provide a set of examples to get you started! Below you can find the details about the examples 
+We provide a set of examples to get you started. 
 
-- Get the examples folder from the github repo
-  ```bash
-  git clone --no-checkout https://github.com/rocm/gsplat.git && cd gsplat && git sparse-checkout init --cone
-  git sparse-checkout add examples && git checkout main
-  ```
-- Install the dependencies and download the test data set
-   ```bash 
+1. Clone the examples folder:
+
+   ```bash
+   git clone --no-checkout https://github.com/rocm/gsplat.git
+   cd gsplat
+   git sparse-checkout init --cone
+   git sparse-checkout add examples
+   git checkout main
+   ```
+
+2. Install dependencies and download datasets:
+
+   ```bash
    cd examples
    ./install_dependencies.sh
    python datasets/download_dataset.py
-  ```
-- To run the examples refer to the docs below.
-  - [Fit a Single Image](https://amd.atlassian.net/wiki/spaces/DCGPUAIST/pages/1128163102/Fit+a+single+image)
-  
-  - [Fit a 2D image with 3D Gaussians.](https://amd.atlassian.net/wiki/spaces/DCGPUAIST/pages/1128134447/Fit+a+COLMAP+Capture)
-  
-  - [Render a large scene in real-time.](https://amd.atlassian.net/wiki/spaces/DCGPUAIST/pages/1128302047/Render+a+Large+Scene)
+   ```
+
+3. To run the examples, refer to the [run a GSplat example](docs/examples/gsplat-examples.rst) topic. The examples are as follows:
+
+- [Fit a Single Image](docs/examples/gsplat-examples.rst#fit-a-single-image)
+- [Fit a 2D image with 3D Gaussians](docs/examples/gsplat-examples.rst#fit-a-single-2d-image-with-3d-gaussians)
+- [Render a large scene in real-time](docs/examples/gsplat-examples.rst#render-a-large-scene-in-real-time)
 
 ## Evaluation
 
-This repo comes with a standalone script that reproduces the official Gaussian Splatting with exactly the same performance on PSNR, SSIM, LPIPS, and converged number of Gaussians. Powered by gsplat’s efficient GPU implementation, the training takes up to **4x less GPU memory** with up to **15% less time** to finish than the official implementation. Full report can be found [here](https://amd.atlassian.net/wiki/spaces/DCGPUAIST/pages/1115965044/Evaluation+Results+on+MI300).
+This repository includes a standalone script that reproduces the official Gaussian Splatting benchmarks with equivalent performance on **PSNR, SSIM, LPIPS**, and the number of converged Gaussians.  
+
+Thanks to GSplat’s optimized GPU implementation:  
+- Training uses up to **4× less GPU memory**  
+- Training is up to **15% faster** compared to the official implementation  
 
 ## Building from source
-Please checkout our [dev-setup](docs/DevSetup.md) documentation for instructions on how to build the gsplat library from source.
+Refer to the [installation instructions](docs/install/gsplat-install.rst) to learn how to build the GSplat library from source.
 
 ## Contributing
-We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software. Please check [Contributing.md](docs/Contributing.md) for more info.
-
+We welcome contributions of all kinds and are open to feedback, bug-reports, and improvements, to help expand the capabilities of this software. See [contributing to GSplat](docs/about/contribute-to-gsplat.rst) for more info.
 
 ## Core Development
 
-This project is developed by the following wonderful contributors (unordered):
+This project is developed and maintained by the following contributors (unordered):  
 
-- [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/) (UC Berkeley): Mentor of the project.
-- [Matthew Tancik](https://www.matthewtancik.com/about-me) (Luma AI): Mentor of the project.
-- [Vickie Ye](https://people.eecs.berkeley.edu/~vye/) (UC Berkeley): Project lead. v0.1 lead.
-- [Matias Turkulainen](https://maturk.github.io/) (Aalto University): Core developer.
-- [Ruilong Li](https://www.liruilong.cn/) (UC Berkeley): Core developer. v1.0 lead.
-- [Justin Kerr](https://kerrj.github.io/) (UC Berkeley): Core developer.
-- [Brent Yi](https://github.com/brentyi) (UC Berkeley): Core developer.
-- [Zhuoyang Pan](https://panzhy.com/) (ShanghaiTech University): Core developer.
-- [Jianbo Ye](http://www.jianboye.org/) (Amazon): Core developer.
+- [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/) (UC Berkeley) – Mentor  
+- [Matthew Tancik](https://www.matthewtancik.com/about-me) (Luma AI) – Mentor  
+- [Vickie Ye](https://people.eecs.berkeley.edu/~vye/) (UC Berkeley) – Project Lead (v0.1)  
+- [Matias Turkulainen](https://maturk.github.io/) (Aalto University) – Core Developer  
+- [Ruilong Li](https://www.liruilong.cn/) (UC Berkeley) – Core Developer (v1.0 Lead)  
+- [Justin Kerr](https://kerrj.github.io/) (UC Berkeley) – Core Developer  
+- [Brent Yi](https://github.com/brentyi) (UC Berkeley) – Core Developer  
+- [Zhuoyang Pan](https://panzhy.com/) (ShanghaiTech University) – Core Developer  
+- [Jianbo Ye](http://www.jianboye.org/) (Amazon) – Core Developer  
 
-We also have a white paper with about the project with benchmarking and mathematical supplement with conventions and derivations, available [here](https://arxiv.org/abs/2409.06765). If you find this library useful in your projects or papers, please consider citing:
+## Citation
 
-```
+We also provide a white paper with benchmarks, mathematical derivations, and conventions: [arXiv link](https://arxiv.org/abs/2409.06765).  
+
+If you use this library in your research, please cite:
+
+```bibtex
 @article{ye2025gsplat,
-  title={gsplat: An open-source library for Gaussian splatting},
+  title={GSplat: An open-source library for Gaussian splatting},
   author={Ye, Vickie and Li, Ruilong and Kerr, Justin and Turkulainen, Matias and Yi, Brent and Pan, Zhuoyang and Seiskari, Otto and Ye, Jianbo and Hu, Jeffrey and Tancik, Matthew and Angjoo Kanazawa},
   journal={Journal of Machine Learning Research},
   volume={26},
