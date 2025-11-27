@@ -19,20 +19,44 @@ To use GSplat, you need the following prerequisites:
 1. Install PyTorch (with ROCm support).  
    The easiest method is using the official ROCm PyTorch Docker image:
 
+   For ROCm 7.0.0:
+
    ```bash
    docker pull rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
    ```
 
+   For ROCm 6.4.3:
+
+   ```bash
+   docker pull rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.6.0
+   ```
+
 2. Launch and connect to the container:
+
+   For ROCm 7.0.0:
 
    ```bash
    docker run --cap-add=SYS_PTRACE --ipc=host --privileged=true      --shm-size=128GB --network=host      --device=/dev/kfd --device=/dev/dri      --group-add video -it -v $HOME:$HOME      --name rocm_pytorch rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.8.0
    ```
 
-3. Install GSplat from the AMD-hosted PyPI repository:
+   For ROCm 6.4.3:
 
    ```bash
-   pip install gsplat --index-url=https://pypi.amd.com/simple
+   docker run --cap-add=SYS_PTRACE --ipc=host --privileged=true      --shm-size=128GB --network=host      --device=/dev/kfd --device=/dev/dri      --group-add video -it -v $HOME:$HOME      --name rocm_pytorch rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.6.0
+   ```
+
+3. Install GSplat from the AMD-hosted PyPI repository:
+
+   For ROCm 7.0.0:
+
+   ```bash
+   pip install gsplat --index-url=https://pypi.amd.com/rocm-7.0.0/simple/
+   ```
+
+   For ROCm 6.4.3:
+
+   ```bash
+   pip install gsplat --extra-index-url=https://pypi.amd.com/rocm-6.4.3/simple/
    ```
 
 4. Verify the installation:
