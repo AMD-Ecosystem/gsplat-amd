@@ -27,7 +27,7 @@ subtrees:
 
 - caption: About
   entries:
-  - url:https://rocm.blogs.amd.com/software-tools-optimization/gsplat/README.html
+  - url: https://rocm.blogs.amd.com/software-tools-optimization/gsplat/README.html
     title: ROCm GSplat blog
   - file: about/contribute-to-gsplat.rst
     title: Contribute to GSplat
