@@ -13,7 +13,7 @@ subtrees:
 
 - caption: Examples
   entries:
-  - file: examples/gsplat-examples.rst 
+  - file: examples/gsplat-examples.rst
     title: Run a GSplat example
 
 - caption: Reference
@@ -29,7 +29,7 @@ subtrees:
   entries:
   - url:https://rocm.blogs.amd.com/software-tools-optimization/gsplat/README.html
     title: ROCm GSplat blog
-  - file: about/contribute-to-gsplat.rst 
+  - file: about/contribute-to-gsplat.rst
     title: Contribute to GSplat
   - file: about/license.rst
     title: License

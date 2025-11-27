@@ -55,6 +55,7 @@ external_toc_path = "./sphinx/_toc.yml" # Defines Table of Content structure def
 extensions = [
     "rocm_docs", 
     "sphinx.ext.autodoc", # for Python docstrings
+    "sphinx_external_toc"
 ]  
 
 html_title = f"{project} {version_number} documentation"
