@@ -29,10 +29,17 @@ GSPLAT  for AMD ROCm™ 1.5.3 depends directly on NumPy and PyTorch for AMD ROCm
    ```
  
 - Install the gsplat from the AMD hosted PYPI repoitory.
-
+  
+  Rocm 6.4
     ```bash
-    pip install gsplat --extra-index-url=https://pypi.amd.com/simple
+    pip install gsplat --extra-index-url=https://pypi.amd.com/rocm-6.4.3/simple/
     ```
+
+  Rocm 7.0
+    ```bash
+    pip install gsplat --index-url=https://pypi.amd.com/rocm-7.0.0/simple/
+    ```
+    
 - Once the installation is sucessful, you can verify the installation using the pip show command
   ```bash
     pip show gsplat
