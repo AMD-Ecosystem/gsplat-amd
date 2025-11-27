@@ -181,11 +181,23 @@ Docker is the recommended method to set up your environment, as it avoids potent
                       --name rocm_pytorch \
                       rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.6.0
 
-3. After setting up the container, install GSplat from the AMD-hosted `PyPI repository <https://pypi.amd.com/simple/>`__:
+3. After setting up the container, install GSplat from the AMD-hosted PyPI repository:
 
-   .. code-block:: bash
+   .. tab-set::
 
-      pip install gsplat --index-url=https://pypi.amd.com/simple
+      .. tab-item:: ROCm 7.0.0
+         :sync: rocm7
+
+         .. code-block:: bash
+
+            pip install gsplat --index-url=https://pypi.amd.com/rocm-7.0.0/simple/
+
+      .. tab-item:: ROCm 6.4.3
+         :sync: rocm6
+
+         .. code-block:: bash
+
+            pip install gsplat --index-url=https://pypi.amd.com/rocm-6.4.3/simple/
 
 4. Verify the installation:
 
