@@ -1,0 +1,35 @@
+defaults:
+  numbered: False
+root: index
+subtrees:
+- entries:
+  - file: what-is-gsplat.rst
+    title: What is GSplat?
+
+- caption: Install
+  entries:
+  - file: install/gsplat-install.rst
+    title: Install GSplat
+
+- caption: Examples
+  entries:
+  - file: examples/gsplat-examples.rst
+    title: Run a GSplat example
+
+- caption: Reference
+  entries:
+  - file: reference/gsplat-api-reference.rst
+    title: API reference
+  - file: reference/benchmark-evaluation.rst
+    title: Benchmarking
+  - file: reference/profile-gsplat-library.rst
+    title: Profiling the library
+
+- caption: About
+  entries:
+  - url: https://rocm.blogs.amd.com/software-tools-optimization/gsplat/README.html
+    title: ROCm GSplat blog
+  - file: about/contribute-to-gsplat.rst
+    title: Contribute to GSplat
+  - file: about/license.rst
+    title: License
