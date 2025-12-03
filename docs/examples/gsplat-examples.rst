@@ -8,7 +8,7 @@
 Run a GSplat example
 ********************************************************************
 
-A set of examples is available to help you get started with GSplat (Gaussian splatting).
+A set of examples is available to help you get started with GSplat (Gaussian splatting) on ROCm.
 
 1. Clone the repository and check out the examples folder:
 
@@ -25,14 +25,14 @@ A set of examples is available to help you get started with GSplat (Gaussian spl
    .. code-block:: bash
 
       cd examples
-      ./install_dependencies.sh
+      pip install -r requirements.txt
       python datasets/download_dataset.py
 
 3. You can then run the provided examples below.
 
-* :ref:`fit-a-single-image`
-* :ref:`fit-a-single-2d-image-with-gaussians`
-* :ref:`render-large-scene-real-time`
+   * :ref:`fit-a-single-image`
+   * :ref:`fit-a-single-2d-image-with-gaussians`
+   * :ref:`render-large-scene-real-time`
 
 Examples
 ====================================================================
@@ -61,6 +61,7 @@ Output:
 
 .. image:: ../images/training_fit_single_image.gif
    :alt: Example of single image Gaussians output
+   :width: 500px
 
 
 .. _fit-a-single-2d-image-with-gaussians:
@@ -96,12 +97,15 @@ Note: If the localhost link does not work, use your system hostname followed by 
 
 .. image:: ../images/colmap_output_processing.png
    :alt: Example output with host name and port number
+   :width: 500px
 
 .. image:: ../images/colmap_output_video_frame.png
    :alt: Example frame from the rendered output video of a COLMAP capture
+   :width: 500px
 
 .. image:: ../images/colmap_output_viser.png
    :alt: Example of a Viser link displayed in the terminal output
+   :width: 500px
 
 
 .. _render-large-scene-real-time:
@@ -133,6 +137,7 @@ This is configured in the ``rasterization()`` API through ``radius_clip``.
 
      .. image:: ../images/viewer_gsplat_scene_grid.png
         :alt: Example viewer rendering with Scene Grid
+        :width: 500px
 
    - With Simple Viewer:
 
@@ -143,3 +148,4 @@ This is configured in the ``rasterization()`` API through ``radius_clip``.
 
      .. image:: ../images/viewer_gsplat_simple_viewer.png
         :alt: Example viewer rendering from a saved checkpoint
+        :width: 500px

@@ -9,7 +9,8 @@ GSplat documentation
 ********************************************************************
 
 `GSplat <https://docs.gsplat.studio/main/>`__ (Gaussian splatting) is an open-source 
-library for GPU-accelerated differentiable rasterization of 3D Gaussians with Python bindings.  
+library for GPU-accelerated differentiable rasterization of 3D Gaussians with Python bindings
+that is part of the AMD ROCm™ Simulation Domain toolkit (ROCm-Simulation).  
 
 This ROCm-enabled release of GSplat is built on top of `PyTorch for AMD ROCm 
 <https://rocm.docs.amd.com/projects/install-on-linux/en/docs-6.4.3/install/3rd-party/pytorch-install.html>`__, 

@@ -11,7 +11,7 @@ Profiling the GSplat library
 This section provides profiling results of GSplat using different rasterization backends and configurations.  
 All evaluations were conducted on an AMD Instinct™ MI300X GPU.  
 
-- **Mem:** GPU memory allocated by the forward + backward rasterization process (excluding input data), measured as the difference of `torch.cuda.max_memory_allocated()` before and after rasterization.  
+- **Mem:** GPU memory allocated by the forward + backward rasterization process (excluding input data), measured as the difference of ``torch.cuda.max_memory_allocated()`` before and after rasterization.  
 - **FPS[fwd/bwd]:** Frames per second for forward/backward passes.  
 - **Packed:** Indicates if packed rasterization is enabled.  
 - **Sparse Grad:** Indicates if sparse gradient computation is used.  

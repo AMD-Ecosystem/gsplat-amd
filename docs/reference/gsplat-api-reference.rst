@@ -8,7 +8,7 @@
 GSplat API reference
 ********************************************************************
 
-This topic contains the API reference of the supported features of GSplat.
+This topic contains the GSplat API reference, listed by supported features.
 
 Supported features
 ====================================================================
@@ -1533,4 +1533,4 @@ rasterization_2dgs_inria_wrapper
 Compression
 =====================================================================
 
-Compression of gaussian parameters is not supported in this version.
+Compression of gaussian parameters is currently not supported.

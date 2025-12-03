@@ -11,11 +11,11 @@ GSplat on ROCm installation
 System requirements
 ====================================================================
 
-To use GSplat (Gaussian splatting) `1.5.3 <https://github.com/nerfstudio-project/gsplat/releases/tag/v1.5.3>`__, you need the following prerequisites:
+To use GSplat (Gaussian splatting) `1.5.3b2 <https://github.com/ROCm/gsplat/tree/release/1.5.3b2>`__, you need the following prerequisites:
 
-- **ROCm version**: `6.4.3 <https://repo.radeon.com/rocm/apt/6.4.3/>`__ , `7.0.0 <https://repo.radeon.com/rocm/apt/7.0/>`__ (recommended)
+- **ROCm version:** `6.4.3 <https://repo.radeon.com/rocm/apt/6.4.3/>`__ , `7.0.0 <https://repo.radeon.com/rocm/apt/7.0/>`__ (recommended)
 - **Operating system:** Ubuntu 22.04, 24.04
-- **GPU platform:** AMD Instinct™ MI300X (GPU target gfx942)
+- **GPU platforms:** AMD Instinct™ MI350X, MI325X, MI300X (GPU targets: gfx950, gfx942)
 - **PyTorch:** `2.6 <https://github.com/ROCm/pytorch/tree/v2.6.0>`__, `2.8 <https://github.com/ROCm/pytorch/tree/v2.8.0>`__ (ROCm-enabled)
 - **Python:** `3.10 <https://www.python.org/downloads/release/python-3100/>`__, `3.12 <https://www.python.org/downloads/release/python-3120/>`__ 
 
@@ -303,7 +303,7 @@ Build steps
 Run unit tests and verify the installation
 ====================================================================
 
-The ``tests/`` folder provides automatic test scripts that verify if the GPU implementations agree with those of PyTorch. 
+The ``tests/`` folder contains automated test scripts that verify that the GPU implementations match those of PyTorch. 
 They primarily focus on validating the functionality of the Gaussian Splatting (GS) and 3D rendering components. 
 These tests ensure the correctness, performance, and stability of the core features implemented in the GSplat library.
 
@@ -328,7 +328,7 @@ These tests ensure the correctness, performance, and stability of the core featu
 Run a GSplat example
 ====================================================================
 
-A set of examples is available to help you get started. See :doc:`run a GSplat example <../examples/gsplat-examples>` for more details.
+A set of examples is available to help you get started. See :doc:`Run a GSplat example <../examples/gsplat-examples>` for more details.
 
 Benchmarking and evaluation
 ====================================================================
@@ -337,7 +337,7 @@ The `https://github.com/ROCm/gsplat <https://github.com/ROCm/gsplat>`_ repositor
 official Gaussian Splatting results with matching performance on ``PSNR``, ``SSIM``, ``LPIPS``, and the converged number of Gaussians.
 See :doc:`benchmarks <../reference/benchmark-evaluation>` for more details.
 
-Known issues and limitations
+Limitations
 -------------------------------------------------------------------
 
 - Compression of ``splat parameters`` (``positions``, ``scales``, ``rotations``, ``colors``, and ``features``) using PNG image encoding is not supported.  

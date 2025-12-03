@@ -31,7 +31,7 @@ all_article_info_author = ""
 
 # Dynamically extract component version
 with open('../CMakeLists.txt', encoding='utf-8') as f:
-    pattern = r'.*\brocm_setup_version\(VERSION\s+([0-9.]+)[^0-9.]+' # Update according to each component's CMakeLists.txt
+    pattern = r'.*\brocm_setup_version\(VERSION\s+([0-9A-Za-z._-]+)' # Update according to each component's CMakeLists.txt
     match = re.search(pattern,
                       f.read())
     if not match:

@@ -22,7 +22,7 @@ To run the benchmark:
    # run batch evaluation
    bash benchmarks/basic.sh
 
-3D Gaussian Splatting (3DGS) evaluation on MI300X
+3D Gaussian Splatting (3DGS) evaluation on AMD Instinct MI300X
 ====================================================================
 
 The following table summarizes the average evaluation metrics, training memory usage, and training time.
