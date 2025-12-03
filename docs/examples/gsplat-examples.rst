@@ -28,7 +28,7 @@ A set of examples is available to help you get started with GSplat (Gaussian spl
       pip install -r requirements.txt
       python datasets/download_dataset.py
 
-3. You can then run the provided examples below.
+3. You can then run the provided examples:
 
    * :ref:`fit-a-single-image`
    * :ref:`fit-a-single-2d-image-with-gaussians`
@@ -37,8 +37,7 @@ A set of examples is available to help you get started with GSplat (Gaussian spl
 Examples
 ====================================================================
 
-This section provides example scripts to help you get started with GSplat.
-
+This section provides example scripts categorized by output.
 
 .. _fit-a-single-image:
 
