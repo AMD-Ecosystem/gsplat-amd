@@ -61,7 +61,7 @@ Output:
 
 .. image:: ../images/training_fit_single_image.gif
    :alt: Example of single image Gaussians output
-   :width: 500px
+   :width: 400px
 
 
 .. _fit-a-single-2d-image-with-gaussians:
@@ -97,15 +97,15 @@ Note: If the localhost link does not work, use your system hostname followed by 
 
 .. image:: ../images/colmap_output_processing.png
    :alt: Example output with host name and port number
-   :width: 500px
+   :width: 600px
 
 .. image:: ../images/colmap_output_video_frame.png
    :alt: Example frame from the rendered output video of a COLMAP capture
-   :width: 500px
+   :width: 600px
 
 .. image:: ../images/colmap_output_viser.png
    :alt: Example of a Viser link displayed in the terminal output
-   :width: 500px
+   :width: 600px
 
 
 .. _render-large-scene-real-time:
@@ -137,7 +137,7 @@ This is configured in the ``rasterization()`` API through ``radius_clip``.
 
      .. image:: ../images/viewer_gsplat_scene_grid.png
         :alt: Example viewer rendering with Scene Grid
-        :width: 500px
+        :width: 600px
 
    - With Simple Viewer:
 
@@ -148,4 +148,4 @@ This is configured in the ``rasterization()`` API through ``radius_clip``.
 
      .. image:: ../images/viewer_gsplat_simple_viewer.png
         :alt: Example viewer rendering from a saved checkpoint
-        :width: 500px
+        :width: 600px
