@@ -15,7 +15,7 @@ To use GSplat (Gaussian splatting) `1.5.3b2 <https://github.com/ROCm/gsplat/tree
 
 - **ROCm version:** `6.4.3 <https://repo.radeon.com/rocm/apt/6.4.3/>`__ , `7.0.0 <https://repo.radeon.com/rocm/apt/7.0/>`__ (recommended)
 - **Operating system:** Ubuntu 22.04, 24.04
-- **GPU platforms:** AMD Instinct™ MI325X, MI300X (GPU target: gfx942)
+- **GPU platforms:** AMD Instinct™ MI325X, MI300X
 - **PyTorch:** `2.6 <https://github.com/ROCm/pytorch/tree/v2.6.0>`__, `2.8 <https://github.com/ROCm/pytorch/tree/v2.8.0>`__ (ROCm-enabled)
 - **Python:** `3.10 <https://www.python.org/downloads/release/python-3100/>`__, `3.12 <https://www.python.org/downloads/release/python-3120/>`__ 
 
