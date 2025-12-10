@@ -330,7 +330,7 @@ if not hasattr(ce, "original_get_compiler_abi_compatibility_and_version"):
 
 
 setup(
-    name="gsplat",
+    name="amd_gsplat",
     version=__version__,
     description=" Python package for differentiable rasterization of gaussians",
     keywords="gaussian, splatting, cuda",
