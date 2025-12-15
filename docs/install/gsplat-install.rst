@@ -190,14 +190,14 @@ Docker is the recommended method to set up your environment, as it avoids potent
 
          .. code-block:: bash
 
-            pip install gsplat --index-url=https://pypi.amd.com/rocm-7.0.0/simple/
+            pip install amd_gsplat --extra-index-url=https://pypi.amd.com/rocm-7.0.0/simple/
 
       .. tab-item:: ROCm 6.4.3
          :sync: rocm6
 
          .. code-block:: bash
 
-            pip install gsplat --index-url=https://pypi.amd.com/rocm-6.4.3/simple/
+            pip install amd_gsplat --extra-index-url=https://pypi.amd.com/rocm-6.4.3/simple/
 
 4. Verify the installation:
 
@@ -209,15 +209,11 @@ Docker is the recommended method to set up your environment, as it avoids potent
 
    .. code-block:: text
 
-      Name: gsplat
-      Version: 1.5.3+fec758f
+      Name: amd_gsplat
+      Version: 1.5.3+30c1e78
       Summary: Python package for differentiable rasterization of gaussians
       Home-page: https://github.com/rocm/gsplat
       Author: AMD Corporation
-      License: Apache 2.0
-      Location: /opt/conda/envs/py_3.12/lib/python3.12/site-packages
-      Requires: jaxtyping, ninja, numpy, rich, torch
-
 .. _build-from-source:
 
 Build GSplat from source
