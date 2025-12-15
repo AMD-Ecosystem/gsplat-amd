@@ -203,7 +203,7 @@ Docker is the recommended method to set up your environment, as it avoids potent
 
    .. code-block:: bash
 
-      pip show gsplat
+      pip show amd_gsplat
 
 5. The output should show as follows:
 
@@ -288,13 +288,13 @@ Build steps
 
    .. code-block:: bash
 
-      pip install dist/gsplat*.whl
+      pip install dist/amd_gsplat*.whl
 
 5. Verify the installation:
 
    .. code-block:: bash
 
-      pip show gsplat
+      pip show amd_gsplat
 
 Run unit tests and verify the installation
 ====================================================================
@@ -307,10 +307,10 @@ These tests ensure the correctness, performance, and stability of the core featu
 
    .. code-block:: bash
 
-      git clone https://github.com/nerfstudio-project/nerfacc.git
+      git clone https://github.com/rocm/nerfacc.git
       cd nerfacc
       python setup.py bdist_wheel
-      pip install dist/nerfacc*.whl
+      pip install dist/amd_nerfacc*.whl
 
 2. Run specific tests from the ``tests`` directory:
 
