@@ -896,11 +896,21 @@ inline __device__ void persp_proj(
     const float cy,
     const uint32_t width,
     const uint32_t height,
+#if USE_ROCM
+    const float near_plane,
+#endif
     // outputs
     mat2 &cov2d,
     vec2 &mean2d
 ) {
     float x = mean3d[0], y = mean3d[1], z = mean3d[2];
+
+#if USE_ROCM
+    // Clamp depth to avoid instability near z ~= 0.
+    const float kMinDepth = 1e-4f;
+    const float min_depth = fmaxf(near_plane, kMinDepth);
+    float z_safe = fabsf(z) < min_depth ? copysignf(min_depth, z) : z;
+#endif
 
     float tan_fovx = 0.5f * width / fx;
     float tan_fovy = 0.5f * height / fy;
@@ -909,10 +919,17 @@ inline __device__ void persp_proj(
     float lim_y_pos = (height - cy) / fy + 0.3f * tan_fovy;
     float lim_y_neg = cy / fy + 0.3f * tan_fovy;
 
+#if USE_ROCM
+    float rz = 1.f / z_safe;
+    float rz2 = rz * rz;
+    float tx = z_safe * min(lim_x_pos, max(-lim_x_neg, x * rz));
+    float ty = z_safe * min(lim_y_pos, max(-lim_y_neg, y * rz));
+#else
     float rz = 1.f / z;
     float rz2 = rz * rz;
     float tx = z * min(lim_x_pos, max(-lim_x_neg, x * rz));
     float ty = z * min(lim_y_pos, max(-lim_y_neg, y * rz));
+#endif
 
     // mat3x2 is 3 columns x 2 rows.
     mat3x2 J = mat3x2(
@@ -946,6 +963,12 @@ inline __device__ void persp_proj_vjp(
 ) {
     float x = mean3d[0], y = mean3d[1], z = mean3d[2];
 
+#if USE_ROCM
+    // Clamp depth in backward to avoid exploding gradients near z ~= 0.
+    const float kMinDepth = 1e-4f;
+    float z_safe = fabsf(z) < kMinDepth ? copysignf(kMinDepth, z) : z;
+#endif
+
     float tan_fovx = 0.5f * width / fx;
     float tan_fovy = 0.5f * height / fy;
     float lim_x_pos = (width - cx) / fx + 0.3f * tan_fovx;
@@ -953,10 +976,17 @@ inline __device__ void persp_proj_vjp(
     float lim_y_pos = (height - cy) / fy + 0.3f * tan_fovy;
     float lim_y_neg = cy / fy + 0.3f * tan_fovy;
 
+#if USE_ROCM
+    float rz = 1.f / z_safe;
+    float rz2 = rz * rz;
+    float tx = z_safe * min(lim_x_pos, max(-lim_x_neg, x * rz));
+    float ty = z_safe * min(lim_y_pos, max(-lim_y_neg, y * rz));
+#else
     float rz = 1.f / z;
     float rz2 = rz * rz;
     float tx = z * min(lim_x_pos, max(-lim_x_neg, x * rz));
     float ty = z * min(lim_y_pos, max(-lim_y_neg, y * rz));
+#endif
 
     // mat3x2 is 3 columns x 2 rows.
     mat3x2 J = mat3x2(
