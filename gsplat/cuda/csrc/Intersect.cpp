@@ -158,7 +158,7 @@ at::Tensor intersect_offset(
 
     auto opt = isect_ids.options();
     at::Tensor offsets = at::empty(
-        {I, tile_height, tile_width}, opt.dtype(at::kInt)
+        {I, tile_height, tile_width}, opt.dtype(at::kLong)
     );
     launch_intersect_offset_kernel(
         isect_ids, I, tile_width, tile_height, offsets
