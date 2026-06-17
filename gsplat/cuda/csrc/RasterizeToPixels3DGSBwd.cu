@@ -473,7 +473,7 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         (float *)&conic_batch[batch_allocation_size]; // [batch_allocation_size * CDIM]
     
     #if USE_ROCM
-    using warp_reduce_float_t = rocprim::warp_reduce<float,64>;
+    using warp_reduce_float_t = rocprim::warp_reduce<float,WARP_SIZE>;
     auto* warp_storage_base   =
     (typename warp_reduce_float_t::storage_type*)
         (rgbs_batch + batch_allocation_size * CDIM);
@@ -500,14 +500,14 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t tr = block.thread_rank();
     
     #if USE_ROCM
-    cg::thread_block_tile<64> warp = cg::tiled_partition<64>(block);
+    cg::thread_block_tile<WARP_SIZE> warp = cg::tiled_partition<WARP_SIZE>(block);
     #else
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
     #endif
-    
+
     #if USE_ROCM
-        __shared__ typename rocprim::warp_reduce<int32_t, 64>::storage_type warp_storage;
-        rocprim::warp_reduce<int32_t, 64> wreduce;
+        __shared__ typename rocprim::warp_reduce<int32_t, WARP_SIZE>::storage_type warp_storage;
+        rocprim::warp_reduce<int32_t, WARP_SIZE> wreduce;
         int32_t warp_bin_final;
         wreduce.reduce( bin_final,            // 1) value held by this lane
                 warp_bin_final,               // 2) reference that will receive the result
@@ -644,12 +644,12 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                 }
             }
             #if USE_ROCM
-            rocprim_warpSum<CDIM, 64>(v_rgb_local, warp_storage_base);   // CDIM-sized float array
-            rocprim_warpSum<64>(v_conic_local, warp_storage_base); // float
-            rocprim_warpSum<64>(v_xy_local, warp_storage_base);    // vec2
+            rocprim_warpSum<CDIM, WARP_SIZE>(v_rgb_local, warp_storage_base);   // CDIM-sized float array
+            rocprim_warpSum<WARP_SIZE>(v_conic_local, warp_storage_base); // float
+            rocprim_warpSum<WARP_SIZE>(v_xy_local, warp_storage_base);    // vec2
             if (v_means2d_abs != nullptr)
-                rocprim_warpSum<64>(v_xy_abs_local, warp_storage_base);// vec2
-            rocprim_warpSum<64>(v_opacity_local, warp_storage_base);// float
+                rocprim_warpSum<WARP_SIZE>(v_xy_abs_local, warp_storage_base);// vec2
+            rocprim_warpSum<WARP_SIZE>(v_opacity_local, warp_storage_base);// float
             if (warp.thread_rank() == 0) {
                 int32_t g = id_batch[t]; // flatten index in [I * N] or [nnz]
                 float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
@@ -761,7 +761,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t block_size = tile_size * tile_size;
     uint32_t max_batch_size;
     int64_t shmem_size;
-    if (block_size == 64) { // wave64-optimized path
+    if (block_size == 64 && WARP_SIZE == 64) { // wave64-only DPP path (CDNA)
       max_batch_size = 32;
       //max_batch_size = min(max_batch_size, block_size);
       if (CDIM <= 32) {
@@ -776,9 +776,9 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
       if (CDIM <= 16) {
         max_batch_size = block_size;
       }
-      const uint32_t warps_per_block = (block_size + 63) / 64; // for 64-lane warp
+      const uint32_t warps_per_block = (block_size + WARP_SIZE - 1) / WARP_SIZE;
       std::size_t warp_scratch_bytes =
-        warps_per_block * sizeof(typename rocprim::warp_reduce<float,64>::storage_type);
+        warps_per_block * sizeof(typename rocprim::warp_reduce<float,WARP_SIZE>::storage_type);
       shmem_size =
         max_batch_size *
         (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3) + sizeof(float) * CDIM) + warp_scratch_bytes;
@@ -813,9 +813,20 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         );
     }
 #else
-    auto KERNEL = (block_size == 64) ?
-	    rasterize_bs64_to_pixels_3dgs_bwd_kernel<CDIM, float> :
-	    rasterize_to_pixels_3dgs_bwd_kernel<CDIM, float>;
+    // The bs64 kernel reduces with rocprim::warp_reduce<...,64> (its hardware-DPP
+    // path is commented out upstream and replaced by rocprim_warpSum<64>). On a
+    // wave32 target that 64-lane instantiation hits rocprim's silent "invalid warp
+    // size" no-op -> wrong color/SH gradients. `if constexpr` ensures the bs64
+    // template is only odr-used (instantiated) on wave64, so the wrong-warp-size
+    // path is never compiled in for gfx1151; on wave64 (CDNA) the selection is
+    // byte-identical to upstream. Both kernels share one signature, so a single
+    // `auto` (deduced from the always-valid wave32 kernel) holds either pointer.
+    auto KERNEL = rasterize_to_pixels_3dgs_bwd_kernel<CDIM, float>;
+    if constexpr (WARP_SIZE == 64) {
+        if (block_size == 64) {
+            KERNEL = rasterize_bs64_to_pixels_3dgs_bwd_kernel<CDIM, float>;
+        }
+    }
     hipError_t err = hipFuncSetAttribute(
         reinterpret_cast<void*>(KERNEL), // Cast to void*
         hipFuncAttributeMaxDynamicSharedMemorySize,

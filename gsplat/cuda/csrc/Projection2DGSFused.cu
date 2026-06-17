@@ -436,7 +436,7 @@ __global__ void projection_2dgs_fused_bwd_kernel(
     auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 
     // Get warp context for dynamic reductions
-    unsigned int warp_thread_id = threadIdx.x % 64;
+    unsigned int warp_thread_id = threadIdx.x % WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
 
     #if USE_ROCM
@@ -445,7 +445,7 @@ __global__ void projection_2dgs_fused_bwd_kernel(
 
         // Elect a leader for atomic write to global memory.
         unsigned long long my_gid_mask = 0;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < WARP_SIZE; ++i) {
             long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
             if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
                 my_gid_mask |= (1ULL << i);
@@ -465,7 +465,7 @@ __global__ void projection_2dgs_fused_bwd_kernel(
     manual_dynamic_reduce_sum_vec2(v_scale, gid, warp_thread_id, warp_active_mask);
 
     unsigned long long my_gid_mask = 0;
-    for (int i = 0; i < 64; ++i) {
+    for (int i = 0; i < WARP_SIZE; ++i) {
         long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
         if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
             my_gid_mask |= (1ULL << i);
@@ -518,7 +518,7 @@ __global__ void projection_2dgs_fused_bwd_kernel(
         manual_dynamic_reduce_sum_vec3(v_t, cid, warp_thread_id, warp_active_mask);
 
         unsigned long long my_cid_mask = 0;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < WARP_SIZE; ++i) {
             long long lane_cid_temp = __shfl_sync(warp_active_mask, cid, i);
             if ((warp_active_mask & (1ULL << i)) && (lane_cid_temp == cid)) {
                 my_cid_mask |= (1ULL << i);

@@ -177,7 +177,10 @@ def get_extensions():
         print("ROCM detected, compiling with HIP support...")
         from torch.utils.cpp_extension import CppExtension
         # Get the GPU architecture dynamically
-        gpu_arch = get_rocm_arch()
+        # gfx1151 fix: honor PYTORCH_ROCM_ARCH first. Upstream get_rocm_arch() runs
+        # rocminfo, which finds no GPU at `docker build` time and falls back to
+        # gfx942 (CDNA) -> a .so with no gfx1151 code objects (runtime null-deref).
+        gpu_arch = (os.environ.get("PYTORCH_ROCM_ARCH") or get_rocm_arch()).split(";")[0].split(",")[0].strip()
         print(f"gpu arch is set to {gpu_arch}")
         conda_prefix = os.getenv("CONDA_PREFIX")
         conda_lib_path = f"{conda_prefix}/lib"
@@ -204,6 +207,11 @@ def get_extensions():
         extra_compile_args["cxx"] += ["-fopenmp"]
 
         hipcc_flags = [ "-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM" , f"--offload-arch={gpu_arch}"]
+        # gfx1151 fix: hipify rewrites the vendored glm's CUDA-version check (CUDA_VERSION ->
+        # TORCH_HIP_VERSION) but that macro is undefined when glm/simd/platform.h is parsed,
+        # so it evaluates to 0 < 7000 -> #error "GLM requires CUDA 7.0 or higher". Define it
+        # high enough to satisfy the (now harmless) hipified version gate.
+        hipcc_flags += ["-DTORCH_HIP_VERSION=8000"]
         if WITH_SYMBOLS:
             hipcc_flags += ["-g", "-ggdb" , "-O0"]
         else:
@@ -225,6 +233,8 @@ def get_extensions():
         current_dir = pathlib.Path(__file__).parent.resolve()
 
         include_dirs = [
+            # vendored GLM first — system glm (libglm-dev) is API-incompatible
+            osp.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm"),
             osp.join(current_dir, "gsplat", "cuda", "include"),
             f"{os.environ['HOME']}/.local/include",
             f"/opt/conda/include",
