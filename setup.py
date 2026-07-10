@@ -179,6 +179,15 @@ def get_extensions():
         extensions_dir = osp.join("gsplat","cuda")
         sources = glob.glob(osp.join(extensions_dir, "csrc", "*.cu")) + glob.glob(osp.join(extensions_dir, "csrc", "*.cpp"))
         sources += [osp.join(extensions_dir, "ext.cpp")]
+        # Wavefront width: CDNA (gfx9xx, e.g. MI2xx/MI3xx) is wave64; RDNA and
+        # CDNA5 (gfx10xx/11xx/12xx, e.g. gfx1250 / MI400) are wave32. gsplat's
+        # reduction kernels are templated on this via GSPLAT_WARP_SIZE; pass it
+        # to BOTH host and device compilation so launcher shmem sizing and the
+        # in-kernel reductions agree. (GSPLAT_USE_WAVE64 is derived from it and
+        # gates the wave64-only single-wave "bs64" DPP rasterizer path.)
+        _arch_num = "".join(ch for ch in gpu_arch[3:] if ch.isdigit())
+        gsplat_warp_size = 32 if _arch_num[:2] in ("10", "11", "12") else 64
+        print(f"gsplat warp size set to {gsplat_warp_size} (for {gpu_arch})")
 
         undef_macros = []
         define_macros = []
@@ -195,7 +204,15 @@ def get_extensions():
         extra_compile_args["cxx"] += ["-DAT_PARALLEL_OPENMP"]
         extra_compile_args["cxx"] += ["-fopenmp"]
 
-        hipcc_flags = [ "-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM" , f"--offload-arch={gpu_arch}"]
+        # Keep host (launcher) compilation in sync with the device warp width.
+        extra_compile_args["cxx"] += [f"-DGSPLAT_WARP_SIZE={gsplat_warp_size}"]
+
+        hipcc_flags = [ "-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM" , f"--offload-arch={gpu_arch}", f"-DGSPLAT_WARP_SIZE={gsplat_warp_size}"]
+        # Emit hardware floating-point global/LDS atomics (global_atomic_add_f32)
+        # instead of slow compare-and-swap (CAS) loops. The 3DGS backward is
+        # dominated by gradient atomicAdds; on wave32 (gfx1250) the atomic count
+        # is already doubled vs wave64, so fast HW atomics matter even more.
+        hipcc_flags += ["-munsafe-fp-atomics"]
         if WITH_SYMBOLS:
             hipcc_flags += ["-g", "-ggdb" , "-O0"]
         else:
