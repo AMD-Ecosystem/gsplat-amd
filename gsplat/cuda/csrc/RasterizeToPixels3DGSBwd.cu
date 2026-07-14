@@ -110,7 +110,8 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
     const bool *__restrict__ masks,           // [..., tile_height, tile_width]
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
@@ -136,7 +137,7 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
     uint32_t image_id = block.group_index().x;
     uint32_t tile_id =
         block.group_index().y * tile_width + block.group_index().z;
-    uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
+    uint32_t i = block.group_index().y * tile_size_h + block.thread_index().y;
     uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
 
     tile_offsets += image_id * tile_height * tile_width;
@@ -429,284 +430,284 @@ __device__ inline void bs32_vecWarpSum(Group g, float (&v)[N]) {
 // NOTE: the 2-wave variant is commented out for now (kept for A/B benchmarking
 // against the 1-wave version below). To re-enable: flip this `#if 0` to `#if 1`
 // and restore its launcher selection/sizing branch.
-#if 0
-template <uint32_t CDIM, typename scalar_t>
-__launch_bounds__(64)
-__global__ void rasterize_bs32_to_pixels_3dgs_bwd_kernel(
-    const uint32_t I,
-    const uint32_t N,
-    const uint32_t n_isects,
-    const bool packed,
-    // fwd inputs
-    const vec2 *__restrict__ means2d,         // [..., N, 2] or [nnz, 2]
-    const vec3 *__restrict__ conics,          // [..., N, 3] or [nnz, 3]
-    const scalar_t *__restrict__ colors,      // [..., N, CDIM] or [nnz, CDIM]
-    const scalar_t *__restrict__ opacities,   // [..., N] or [nnz]
-    const scalar_t *__restrict__ backgrounds, // [..., CDIM] or [nnz, CDIM]
-    const bool *__restrict__ masks,           // [..., tile_height, tile_width]
-    const uint32_t image_width,
-    const uint32_t image_height,
-    const uint32_t tile_size,
-    const uint32_t tile_width,
-    const uint32_t tile_height,
-    const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
-    const int32_t *__restrict__ flatten_ids,  // [n_isects]
-    // fwd outputs
-    const scalar_t
-        *__restrict__ render_alphas,      // [..., image_height, image_width, 1]
-    const int32_t *__restrict__ last_ids, // [..., image_height, image_width]
-    // grad outputs
-    const scalar_t *__restrict__ v_render_colors, // [..., image_height,
-                                                  // image_width, CDIM]
-    const scalar_t
-        *__restrict__ v_render_alphas, // [..., image_height, image_width, 1]
-    // grad inputs
-    vec2 *__restrict__ v_means2d_abs,  // [..., N, 2] or [nnz, 2]
-    vec2 *__restrict__ v_means2d,      // [..., N, 2] or [nnz, 2]
-    vec3 *__restrict__ v_conics,       // [..., N, 3] or [nnz, 3]
-    scalar_t *__restrict__ v_colors,   // [..., N, CDIM] or [nnz, CDIM]
-    scalar_t *__restrict__ v_opacities, // [..., N] or [nnz]
-    const uint32_t max_batch_size
-) {
-    auto block = cg::this_thread_block();
-    uint32_t image_id = block.group_index().x;
-    uint32_t tile_id =
-        block.group_index().y * tile_width + block.group_index().z;
-    uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
-    uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
+// #if 0
+// template <uint32_t CDIM, typename scalar_t>
+// __launch_bounds__(64)
+// __global__ void rasterize_bs32_to_pixels_3dgs_bwd_kernel(
+//     const uint32_t I,
+//     const uint32_t N,
+//     const uint32_t n_isects,
+//     const bool packed,
+//     // fwd inputs
+//     const vec2 *__restrict__ means2d,         // [..., N, 2] or [nnz, 2]
+//     const vec3 *__restrict__ conics,          // [..., N, 3] or [nnz, 3]
+//     const scalar_t *__restrict__ colors,      // [..., N, CDIM] or [nnz, CDIM]
+//     const scalar_t *__restrict__ opacities,   // [..., N] or [nnz]
+//     const scalar_t *__restrict__ backgrounds, // [..., CDIM] or [nnz, CDIM]
+//     const bool *__restrict__ masks,           // [..., tile_height, tile_width]
+//     const uint32_t image_width,
+//     const uint32_t image_height,
+//     const uint32_t tile_size,
+//     const uint32_t tile_width,
+//     const uint32_t tile_height,
+//     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
+//     const int32_t *__restrict__ flatten_ids,  // [n_isects]
+//     // fwd outputs
+//     const scalar_t
+//         *__restrict__ render_alphas,      // [..., image_height, image_width, 1]
+//     const int32_t *__restrict__ last_ids, // [..., image_height, image_width]
+//     // grad outputs
+//     const scalar_t *__restrict__ v_render_colors, // [..., image_height,
+//                                                   // image_width, CDIM]
+//     const scalar_t
+//         *__restrict__ v_render_alphas, // [..., image_height, image_width, 1]
+//     // grad inputs
+//     vec2 *__restrict__ v_means2d_abs,  // [..., N, 2] or [nnz, 2]
+//     vec2 *__restrict__ v_means2d,      // [..., N, 2] or [nnz, 2]
+//     vec3 *__restrict__ v_conics,       // [..., N, 3] or [nnz, 3]
+//     scalar_t *__restrict__ v_colors,   // [..., N, CDIM] or [nnz, CDIM]
+//     scalar_t *__restrict__ v_opacities, // [..., N] or [nnz]
+//     const uint32_t max_batch_size
+// ) {
+//     auto block = cg::this_thread_block();
+//     uint32_t image_id = block.group_index().x;
+//     uint32_t tile_id =
+//         block.group_index().y * tile_width + block.group_index().z;
+//     uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
+//     uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
 
-    tile_offsets += image_id * tile_height * tile_width;
-    render_alphas += image_id * image_height * image_width;
-    last_ids += image_id * image_height * image_width;
-    v_render_colors += image_id * image_height * image_width * CDIM;
-    v_render_alphas += image_id * image_height * image_width;
-    if (backgrounds != nullptr) {
-        backgrounds += image_id * CDIM;
-    }
-    if (masks != nullptr) {
-        masks += image_id * tile_height * tile_width;
-    }
+//     tile_offsets += image_id * tile_height * tile_width;
+//     render_alphas += image_id * image_height * image_width;
+//     last_ids += image_id * image_height * image_width;
+//     v_render_colors += image_id * image_height * image_width * CDIM;
+//     v_render_alphas += image_id * image_height * image_width;
+//     if (backgrounds != nullptr) {
+//         backgrounds += image_id * CDIM;
+//     }
+//     if (masks != nullptr) {
+//         masks += image_id * tile_height * tile_width;
+//     }
 
-    // when the mask is provided, do nothing and return if
-    // this tile is labeled as False
-    if (masks != nullptr && !masks[tile_id]) {
-        return;
-    }
+//     // when the mask is provided, do nothing and return if
+//     // this tile is labeled as False
+//     if (masks != nullptr && !masks[tile_id]) {
+//         return;
+//     }
 
-    const float px = (float)j + 0.5f;
-    const float py = (float)i + 0.5f;
-    // clamp this value to the last pixel
-    const int32_t pix_id =
-        min(i * image_width + j, image_width * image_height - 1);
+//     const float px = (float)j + 0.5f;
+//     const float py = (float)i + 0.5f;
+//     // clamp this value to the last pixel
+//     const int32_t pix_id =
+//         min(i * image_width + j, image_width * image_height - 1);
 
-    // keep not rasterizing threads around for reading data
-    bool inside = (i < image_height && j < image_width);
+//     // keep not rasterizing threads around for reading data
+//     bool inside = (i < image_height && j < image_width);
 
-    // which gaussians to look through in this tile
-    int32_t range_start = tile_offsets[tile_id];
-    int32_t range_end =
-        (image_id == I - 1) && (tile_id == tile_width * tile_height - 1)
-            ? n_isects
-            : tile_offsets[tile_id + 1];
+//     // which gaussians to look through in this tile
+//     int32_t range_start = tile_offsets[tile_id];
+//     int32_t range_end =
+//         (image_id == I - 1) && (tile_id == tile_width * tile_height - 1)
+//             ? n_isects
+//             : tile_offsets[tile_id + 1];
 
-    const uint32_t num_batches =
-        (range_end - range_start + max_batch_size - 1) / max_batch_size;
+//     const uint32_t num_batches =
+//         (range_end - range_start + max_batch_size - 1) / max_batch_size;
 
-    // this is the T AFTER the last gaussian in this pixel
-    float T_final = 1.0f - render_alphas[pix_id];
-    float T = T_final;
-    // the contribution from gaussians behind the current one
-    float buffer[CDIM] = {0.f};
-    // index of last gaussian to contribute to this pixel
-    const int32_t bin_final = inside ? last_ids[pix_id] : 0;
+//     // this is the T AFTER the last gaussian in this pixel
+//     float T_final = 1.0f - render_alphas[pix_id];
+//     float T = T_final;
+//     // the contribution from gaussians behind the current one
+//     float buffer[CDIM] = {0.f};
+//     // index of last gaussian to contribute to this pixel
+//     const int32_t bin_final = inside ? last_ids[pix_id] : 0;
 
-    // df/d_out for this pixel
-    float v_render_c[CDIM];
-#pragma unroll
-    for (uint32_t k = 0; k < CDIM; ++k) {
-        v_render_c[k] = v_render_colors[pix_id * CDIM + k];
-    }
-    const float v_render_a = v_render_alphas[pix_id];
+//     // df/d_out for this pixel
+//     float v_render_c[CDIM];
+// #pragma unroll
+//     for (uint32_t k = 0; k < CDIM; ++k) {
+//         v_render_c[k] = v_render_colors[pix_id * CDIM + k];
+//     }
+//     const float v_render_a = v_render_alphas[pix_id];
 
-    // On a wave32 device an 8x8 tile == 2 waves; each wave reduces over its own
-    // 32 pixels and does its own atomicAdd. No shared memory is used: batch data
-    // lives in per-lane registers and is broadcast with warp.shfl().
-    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
-    const uint32_t lane = warp.thread_rank();
+//     // On a wave32 device an 8x8 tile == 2 waves; each wave reduces over its own
+//     // 32 pixels and does its own atomicAdd. No shared memory is used: batch data
+//     // lives in per-lane registers and is broadcast with warp.shfl().
+//     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+//     const uint32_t lane = warp.thread_rank();
 
-    int32_t warp_bin_final = bs32_allreduce_max(warp, bin_final);
+//     int32_t warp_bin_final = bs32_allreduce_max(warp, bin_final);
 
-    int32_t _id_batch;
-    vec3 _xy_opacity_batch;
-    vec3 _conic_batch;
-    float _rgbs_batch[CDIM];
-    for (uint32_t b = 0; b < num_batches; ++b) {
-        // no shared mem to protect, but keep lanes in lockstep before reloading
-        // registers that other lanes will shfl-read this iteration
-        warp.sync();
+//     int32_t _id_batch;
+//     vec3 _xy_opacity_batch;
+//     vec3 _conic_batch;
+//     float _rgbs_batch[CDIM];
+//     for (uint32_t b = 0; b < num_batches; ++b) {
+//         // no shared mem to protect, but keep lanes in lockstep before reloading
+//         // registers that other lanes will shfl-read this iteration
+//         warp.sync();
 
-        // each lane fetches 1 gaussian from back to front; both waves of the
-        // tile load the SAME 32 gaussians (they share the tile's gaussian list)
-        const int64_t batch_end = range_end - 1 - max_batch_size * b;
-        const uint32_t current_batch_size =
-            (uint32_t)min((int64_t)max_batch_size, batch_end + 1 - range_start);
-        const int64_t idx = batch_end - lane;
-        if (lane < current_batch_size && idx >= range_start) {
-            int32_t g = flatten_ids[idx]; // flatten index in [I * N] or [nnz]
-            _id_batch = g;
-            const vec2 xy = means2d[g];
-            const float opac = opacities[g];
-            _xy_opacity_batch = {xy.x, xy.y, opac};
-            _conic_batch = conics[g];
-#pragma unroll
-            for (uint32_t k = 0; k < CDIM; ++k) {
-                _rgbs_batch[k] = colors[g * CDIM + k];
-            }
-        }
-        warp.sync();
+//         // each lane fetches 1 gaussian from back to front; both waves of the
+//         // tile load the SAME 32 gaussians (they share the tile's gaussian list)
+//         const int64_t batch_end = range_end - 1 - max_batch_size * b;
+//         const uint32_t current_batch_size =
+//             (uint32_t)min((int64_t)max_batch_size, batch_end + 1 - range_start);
+//         const int64_t idx = batch_end - lane;
+//         if (lane < current_batch_size && idx >= range_start) {
+//             int32_t g = flatten_ids[idx]; // flatten index in [I * N] or [nnz]
+//             _id_batch = g;
+//             const vec2 xy = means2d[g];
+//             const float opac = opacities[g];
+//             _xy_opacity_batch = {xy.x, xy.y, opac};
+//             _conic_batch = conics[g];
+// #pragma unroll
+//             for (uint32_t k = 0; k < CDIM; ++k) {
+//                 _rgbs_batch[k] = colors[g * CDIM + k];
+//             }
+//         }
+//         warp.sync();
 
-        // process gaussians in the current batch for this pixel
-        // 0 index is the furthest back gaussian in the batch
-        for (uint32_t t = max(0, batch_end - warp_bin_final);
-             t < current_batch_size; ++t) {
-            bool valid = inside;
-            if (batch_end - t > bin_final) {
-                valid = 0;
-            }
-            // broadcast gaussian t (held by lane t) to every lane in the wave
-            vec3 conic;
-            conic.x = warp.shfl(_conic_batch.x, t);
-            conic.y = warp.shfl(_conic_batch.y, t);
-            conic.z = warp.shfl(_conic_batch.z, t);
-            vec3 xy_opac;
-            xy_opac.x = warp.shfl(_xy_opacity_batch.x, t);
-            xy_opac.y = warp.shfl(_xy_opacity_batch.y, t);
-            xy_opac.z = warp.shfl(_xy_opacity_batch.z, t);
-            float rgb_t[CDIM];
-#pragma unroll
-            for (uint32_t k = 0; k < CDIM; ++k) {
-                rgb_t[k] = warp.shfl(_rgbs_batch[k], t);
-            }
+//         // process gaussians in the current batch for this pixel
+//         // 0 index is the furthest back gaussian in the batch
+//         for (uint32_t t = max(0, batch_end - warp_bin_final);
+//              t < current_batch_size; ++t) {
+//             bool valid = inside;
+//             if (batch_end - t > bin_final) {
+//                 valid = 0;
+//             }
+//             // broadcast gaussian t (held by lane t) to every lane in the wave
+//             vec3 conic;
+//             conic.x = warp.shfl(_conic_batch.x, t);
+//             conic.y = warp.shfl(_conic_batch.y, t);
+//             conic.z = warp.shfl(_conic_batch.z, t);
+//             vec3 xy_opac;
+//             xy_opac.x = warp.shfl(_xy_opacity_batch.x, t);
+//             xy_opac.y = warp.shfl(_xy_opacity_batch.y, t);
+//             xy_opac.z = warp.shfl(_xy_opacity_batch.z, t);
+//             float rgb_t[CDIM];
+// #pragma unroll
+//             for (uint32_t k = 0; k < CDIM; ++k) {
+//                 rgb_t[k] = warp.shfl(_rgbs_batch[k], t);
+//             }
 
-            float alpha;
-            float opac;
-            vec2 delta;
-            float vis;
-            if (valid) {
-                opac = xy_opac.z;
-                delta = {xy_opac.x - px, xy_opac.y - py};
-                float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                      conic.z * delta.y * delta.y) +
-                              conic.y * delta.x * delta.y;
-                vis = __expf(-sigma);
-                alpha = min(0.999f, opac * vis);
-                if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
-                    valid = false;
-                }
-            }
+//             float alpha;
+//             float opac;
+//             vec2 delta;
+//             float vis;
+//             if (valid) {
+//                 opac = xy_opac.z;
+//                 delta = {xy_opac.x - px, xy_opac.y - py};
+//                 float sigma = 0.5f * (conic.x * delta.x * delta.x +
+//                                       conic.z * delta.y * delta.y) +
+//                               conic.y * delta.x * delta.y;
+//                 vis = __expf(-sigma);
+//                 alpha = min(0.999f, opac * vis);
+//                 if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
+//                     valid = false;
+//                 }
+//             }
 
-            // if all threads are inactive in this warp, skip this loop
-            if (!warp.any(valid)) {
-                continue;
-            }
-            float v_rgb_local[CDIM] = {0.f};
-            vec3 v_conic_local = {0.f, 0.f, 0.f};
-            vec2 v_xy_local = {0.f, 0.f};
-            vec2 v_xy_abs_local = {0.f, 0.f};
-            float v_opacity_local = 0.f;
-            // initialize everything to 0, only set if the lane is valid
-            if (valid) {
-                // compute the current T for this gaussian
-                float ra = 1.0f / (1.0f - alpha);
-                T *= ra;
-                // update v_rgb for this gaussian
-                const float fac = alpha * T;
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-                    v_rgb_local[k] = fac * v_render_c[k];
-                }
-                // contribution from this pixel
-                float v_alpha = 0.f;
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-                    v_alpha += (rgb_t[k] * T - buffer[k] * ra) * v_render_c[k];
-                }
+//             // if all threads are inactive in this warp, skip this loop
+//             if (!warp.any(valid)) {
+//                 continue;
+//             }
+//             float v_rgb_local[CDIM] = {0.f};
+//             vec3 v_conic_local = {0.f, 0.f, 0.f};
+//             vec2 v_xy_local = {0.f, 0.f};
+//             vec2 v_xy_abs_local = {0.f, 0.f};
+//             float v_opacity_local = 0.f;
+//             // initialize everything to 0, only set if the lane is valid
+//             if (valid) {
+//                 // compute the current T for this gaussian
+//                 float ra = 1.0f / (1.0f - alpha);
+//                 T *= ra;
+//                 // update v_rgb for this gaussian
+//                 const float fac = alpha * T;
+// #pragma unroll
+//                 for (uint32_t k = 0; k < CDIM; ++k) {
+//                     v_rgb_local[k] = fac * v_render_c[k];
+//                 }
+//                 // contribution from this pixel
+//                 float v_alpha = 0.f;
+// #pragma unroll
+//                 for (uint32_t k = 0; k < CDIM; ++k) {
+//                     v_alpha += (rgb_t[k] * T - buffer[k] * ra) * v_render_c[k];
+//                 }
 
-                v_alpha += T_final * ra * v_render_a;
-                // contribution from background pixel
-                if (backgrounds != nullptr) {
-                    float accum = 0.f;
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) {
-                        accum += backgrounds[k] * v_render_c[k];
-                    }
-                    v_alpha += -T_final * ra * accum;
-                }
+//                 v_alpha += T_final * ra * v_render_a;
+//                 // contribution from background pixel
+//                 if (backgrounds != nullptr) {
+//                     float accum = 0.f;
+// #pragma unroll
+//                     for (uint32_t k = 0; k < CDIM; ++k) {
+//                         accum += backgrounds[k] * v_render_c[k];
+//                     }
+//                     v_alpha += -T_final * ra * accum;
+//                 }
 
-                if (opac * vis <= 0.999f) {
-                    const float v_sigma = -opac * vis * v_alpha;
-                    v_conic_local = {
-                        0.5f * v_sigma * delta.x * delta.x,
-                        v_sigma * delta.x * delta.y,
-                        0.5f * v_sigma * delta.y * delta.y
-                    };
-                    v_xy_local = {
-                        v_sigma * (conic.x * delta.x + conic.y * delta.y),
-                        v_sigma * (conic.y * delta.x + conic.z * delta.y)
-                    };
-                    if (v_means2d_abs != nullptr) {
-                        v_xy_abs_local = {abs(v_xy_local.x), abs(v_xy_local.y)};
-                    }
-                    v_opacity_local = vis * v_alpha;
-                }
+//                 if (opac * vis <= 0.999f) {
+//                     const float v_sigma = -opac * vis * v_alpha;
+//                     v_conic_local = {
+//                         0.5f * v_sigma * delta.x * delta.x,
+//                         v_sigma * delta.x * delta.y,
+//                         0.5f * v_sigma * delta.y * delta.y
+//                     };
+//                     v_xy_local = {
+//                         v_sigma * (conic.x * delta.x + conic.y * delta.y),
+//                         v_sigma * (conic.y * delta.x + conic.z * delta.y)
+//                     };
+//                     if (v_means2d_abs != nullptr) {
+//                         v_xy_abs_local = {abs(v_xy_local.x), abs(v_xy_local.y)};
+//                     }
+//                     v_opacity_local = vis * v_alpha;
+//                 }
 
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-                    buffer[k] += rgb_t[k] * fac;
-                }
-            }
-            // reduce partial grads across the 32 pixels of this wave (shfl only)
-            bs32_vecWarpSum<CDIM>(warp, v_rgb_local); // CDIM-sized float array
-            bs32_warpSum(warp, v_conic_local);        // vec3
-            bs32_warpSum(warp, v_xy_local);           // vec2
-            if (v_means2d_abs != nullptr)
-                bs32_warpSum(warp, v_xy_abs_local);   // vec2
-            bs32_warpSum(warp, v_opacity_local);      // float
+// #pragma unroll
+//                 for (uint32_t k = 0; k < CDIM; ++k) {
+//                     buffer[k] += rgb_t[k] * fac;
+//                 }
+//             }
+//             // reduce partial grads across the 32 pixels of this wave (shfl only)
+//             bs32_vecWarpSum<CDIM>(warp, v_rgb_local); // CDIM-sized float array
+//             bs32_warpSum(warp, v_conic_local);        // vec3
+//             bs32_warpSum(warp, v_xy_local);           // vec2
+//             if (v_means2d_abs != nullptr)
+//                 bs32_warpSum(warp, v_xy_abs_local);   // vec2
+//             bs32_warpSum(warp, v_opacity_local);      // float
 
-            int32_t g = warp.shfl(_id_batch, t); // flatten index in [I*N] or [nnz]
+//             int32_t g = warp.shfl(_id_batch, t); // flatten index in [I*N] or [nnz]
 
-            // colors: after the all-reduce every lane holds the full result, so
-            // spread the CDIM atomics across the wave's lanes (channel k written
-            // by lane k%32) using compile-time indices (no register spill)
-            float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
-#pragma unroll
-            for (uint32_t k = 0; k < CDIM; ++k) {
-                if (lane == (k & 31u))
-                    atomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
-            }
+//             // colors: after the all-reduce every lane holds the full result, so
+//             // spread the CDIM atomics across the wave's lanes (channel k written
+//             // by lane k%32) using compile-time indices (no register spill)
+//             float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
+// #pragma unroll
+//             for (uint32_t k = 0; k < CDIM; ++k) {
+//                 if (lane == (k & 31u))
+//                     atomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
+//             }
 
-            if (lane == 0) {
-                float *v_conic_ptr = (float *)(v_conics) + 3 * g;
-                atomicAdd(v_conic_ptr, v_conic_local.x);
-                atomicAdd(v_conic_ptr + 1, v_conic_local.y);
-                atomicAdd(v_conic_ptr + 2, v_conic_local.z);
+//             if (lane == 0) {
+//                 float *v_conic_ptr = (float *)(v_conics) + 3 * g;
+//                 atomicAdd(v_conic_ptr, v_conic_local.x);
+//                 atomicAdd(v_conic_ptr + 1, v_conic_local.y);
+//                 atomicAdd(v_conic_ptr + 2, v_conic_local.z);
 
-                float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
-                atomicAdd(v_xy_ptr, v_xy_local.x);
-                atomicAdd(v_xy_ptr + 1, v_xy_local.y);
+//                 float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
+//                 atomicAdd(v_xy_ptr, v_xy_local.x);
+//                 atomicAdd(v_xy_ptr + 1, v_xy_local.y);
 
-                if (v_means2d_abs != nullptr) {
-                    float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
-                    atomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
-                    atomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
-                }
+//                 if (v_means2d_abs != nullptr) {
+//                     float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
+//                     atomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
+//                     atomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
+//                 }
 
-                atomicAdd(v_opacities + g, v_opacity_local);
-            }
-        }
-    }
-}
-#endif // end #if 0 (2-wave variant)
+//                 atomicAdd(v_opacities + g, v_opacity_local);
+//             }
+//         }
+//     }
+// }
+// #endif // end #if 0 (2-wave variant)
 
 // ---------------------------------------------------------------------------
 // Wave32 (gfx1250) 1-wave variant: a SINGLE 32-lane wave covers the whole 8x8
@@ -739,7 +740,8 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
     const bool *__restrict__ masks,           // [..., tile_height, tile_width]
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
@@ -795,15 +797,25 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
     bool inside_arr[2];
     float T[2], T_final[2], v_render_a_arr[2];
     int32_t bin_final_arr[2];
-    float buffer[2][CDIM];
-    float v_render_c[2][CDIM];
+
+    // Dynamic LDS layout (single 32-lane wave covering a 64-pixel tile):
+    //   s_rgbs : [max_batch_size * CDIM]          color batch (shared across lanes)
+    //   s_vrc  : [2 * GSPLAT_WARP_SIZE * CDIM]     per-pixel v_render_colors grad
+    //   s_buf  : [2 * GSPLAT_WARP_SIZE * CDIM]     per-pixel color accumulator
+    // s_vrc/s_buf are per-lane-private (each lane only touches its own two pixels
+    // p = lane + 32*s), so they need no cross-lane sync; they live in LDS purely
+    // to cut VGPR pressure.
+    extern __shared__ float s_mem[];
+    float *s_rgbs = s_mem;
+    float *s_vrc = s_mem + (size_t)max_batch_size * CDIM;
+    float *s_buf = s_vrc + (size_t)2 * GSPLAT_WARP_SIZE * CDIM;
 
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
         uint32_t p = lane + 32u * (uint32_t)s; // 0..63 within the tile
         uint32_t row = p / tile_size;
         uint32_t col = p % tile_size;
-        uint32_t i = block.group_index().y * tile_size + row;
+        uint32_t i = block.group_index().y * tile_size_h + row;
         uint32_t j = block.group_index().z * tile_size + col;
         px[s] = (float)j + 0.5f;
         py[s] = (float)i + 0.5f;
@@ -815,8 +827,8 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
         bin_final_arr[s] = inside_arr[s] ? last_ids[pix_id_arr[s]] : 0;
 #pragma unroll
         for (uint32_t k = 0; k < CDIM; ++k) {
-            buffer[s][k] = 0.f;
-            v_render_c[s][k] = v_render_colors[pix_id_arr[s] * CDIM + k];
+            s_buf[p * CDIM + k] = 0.f;
+            s_vrc[p * CDIM + k] = v_render_colors[pix_id_arr[s] * CDIM + k];
         }
         v_render_a_arr[s] = v_render_alphas[pix_id_arr[s]];
     }
@@ -849,7 +861,8 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
     int32_t _id_batch;
     vec3 _xy_opacity_batch;
     vec3 _conic_batch;
-    float _rgbs_batch[CDIM];
+    // s_rgbs (colors batch) is staged in dynamic LDS like the bs64 kernel: the
+    // single wave writes lane -> [lane*CDIM] and reads Gaussian t from [t*CDIM].
     for (uint32_t b = 0; b < num_batches; ++b) {
         warp.sync();
 
@@ -867,7 +880,7 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
             _conic_batch = conics[g];
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
-                _rgbs_batch[k] = colors[g * CDIM + k];
+                s_rgbs[lane * CDIM + k] = colors[g * CDIM + k];
             }
         }
         warp.sync();
@@ -883,11 +896,7 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
             xy_opac.x = warp.shfl(_xy_opacity_batch.x, t);
             xy_opac.y = warp.shfl(_xy_opacity_batch.y, t);
             xy_opac.z = warp.shfl(_xy_opacity_batch.z, t);
-            float rgb_t[CDIM];
-#pragma unroll
-            for (uint32_t k = 0; k < CDIM; ++k) {
-                rgb_t[k] = warp.shfl(_rgbs_batch[k], t);
-            }
+            // colors for gaussian t are read directly from LDS (s_rgbs) below
 
             // this lane's contribution for gaussian t, summed over its 2 pixels
             float v_rgb_local[CDIM] = {0.f};
@@ -920,25 +929,29 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
                     }
                 }
                 if (valid) {
+                    // this lane's per-pixel LDS slabs for pixel s
+                    const uint32_t p_s = lane + GSPLAT_WARP_SIZE * (uint32_t)s;
+                    const float *vrc_s = s_vrc + p_s * CDIM;
+                    float *buf_s = s_buf + p_s * CDIM;
                     float ra = 1.0f / (1.0f - alpha);
                     T[s] *= ra;
                     const float fac = alpha * T[s];
 #pragma unroll
                     for (uint32_t k = 0; k < CDIM; ++k) {
-                        v_rgb_local[k] += fac * v_render_c[s][k];
+                        v_rgb_local[k] += fac * vrc_s[k];
                     }
                     float v_alpha = 0.f;
 #pragma unroll
                     for (uint32_t k = 0; k < CDIM; ++k) {
-                        v_alpha += (rgb_t[k] * T[s] - buffer[s][k] * ra) *
-                                   v_render_c[s][k];
+                        v_alpha += (s_rgbs[t * CDIM + k] * T[s] - buf_s[k] * ra) *
+                                   vrc_s[k];
                     }
                     v_alpha += T_final[s] * ra * v_render_a_arr[s];
                     if (backgrounds != nullptr) {
                         float accum = 0.f;
 #pragma unroll
                         for (uint32_t k = 0; k < CDIM; ++k) {
-                            accum += backgrounds[k] * v_render_c[s][k];
+                            accum += backgrounds[k] * vrc_s[k];
                         }
                         v_alpha += -T_final[s] * ra * accum;
                     }
@@ -961,7 +974,7 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
                     }
 #pragma unroll
                     for (uint32_t k = 0; k < CDIM; ++k) {
-                        buffer[s][k] += rgb_t[k] * fac;
+                        buf_s[k] += s_rgbs[t * CDIM + k] * fac;
                     }
                 }
                 any_valid |= valid;
@@ -1009,10 +1022,21 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
     }
 }
 
-#endif
-
+// ---------------------------------------------------------------------------
+// Wave32 (gfx1250) 1:1 variant: a SINGLE 32-lane wave covers a 32-pixel tile
+// (e.g. 8 wide x 4 tall) with EXACTLY ONE pixel per lane -- the true wave32
+// analog of the wave64 bs64 kernel. Per-Gaussian id/mean/opacity/conic live in
+// per-lane registers and are broadcast within the wave via warp.shfl(); only the
+// color batch (rgbs) is staged in dynamic LDS. One 32-lane rocprim (DPP)
+// reduction collapses each Gaussian's gradients across the 32 pixels and lane 0
+// issues a SINGLE atomicAdd set per Gaussian per tile (1 atomic/Gaussian/tile,
+// each Gaussian loaded once). Launched with a 2D {tile_size, tile_size_h} block
+// (== 32 threads), so pixel<->lane mapping is the same as the generic kernel.
+// Because there is only ONE pixel per lane, per-pixel register state (T, buffer,
+// v_render_c) is NOT doubled vs the 8x8 2-px/lane kernel.
 template <uint32_t CDIM, typename scalar_t>
-__global__ void rasterize_to_pixels_3dgs_bwd_kernel(
+__launch_bounds__(32)
+__global__ void rasterize_bs32_1to1_to_pixels_3dgs_bwd_kernel(
     const uint32_t I,
     const uint32_t N,
     const uint32_t n_isects,
@@ -1026,7 +1050,8 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     const bool *__restrict__ masks,           // [..., tile_height, tile_width]
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
@@ -1052,7 +1077,273 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     uint32_t image_id = block.group_index().x;
     uint32_t tile_id =
         block.group_index().y * tile_width + block.group_index().z;
-    uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
+    uint32_t i = block.group_index().y * tile_size_h + block.thread_index().y;
+    uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
+
+    tile_offsets += image_id * tile_height * tile_width;
+    render_alphas += image_id * image_height * image_width;
+    last_ids += image_id * image_height * image_width;
+    v_render_colors += image_id * image_height * image_width * CDIM;
+    v_render_alphas += image_id * image_height * image_width;
+    if (backgrounds != nullptr) {
+        backgrounds += image_id * CDIM;
+    }
+    if (masks != nullptr) {
+        masks += image_id * tile_height * tile_width;
+    }
+
+    // when the mask is provided, do nothing and return if
+    // this tile is labeled as False
+    if (masks != nullptr && !masks[tile_id]) {
+        return;
+    }
+
+    const float px = (float)j + 0.5f;
+    const float py = (float)i + 0.5f;
+    // clamp this value to the last pixel
+    const int32_t pix_id =
+        min(i * image_width + j, image_width * image_height - 1);
+    // keep not rasterizing threads around for reading data
+    bool inside = (i < image_height && j < image_width);
+
+    // which gaussians to look through in this tile
+    int32_t range_start = tile_offsets[tile_id];
+    int32_t range_end =
+        (image_id == I - 1) && (tile_id == tile_width * tile_height - 1)
+            ? n_isects
+            : tile_offsets[tile_id + 1];
+
+    const uint32_t num_batches =
+        (range_end - range_start + max_batch_size - 1) / max_batch_size;
+
+    // dynamic LDS: color batch [max_batch_size * CDIM] followed by one rocprim
+    // warp_reduce storage object (single 32-lane wave -> single warp).
+    extern __shared__ float s_bs32_1to1[];
+    float *rgbs_batch = s_bs32_1to1; // [max_batch_size * CDIM]
+    using warp_reduce_float_t = rocprim::warp_reduce<float, GSPLAT_WARP_SIZE>;
+    auto *warp_storage_base = (typename warp_reduce_float_t::storage_type *)(
+        rgbs_batch + (size_t)max_batch_size * CDIM);
+
+    // this is the T AFTER the last gaussian in this pixel
+    float T_final = 1.0f - render_alphas[pix_id];
+    float T = T_final;
+    // the contribution from gaussians behind the current one
+    float buffer[CDIM] = {0.f};
+    // index of last gaussian to contribute to this pixel
+    const int32_t bin_final = inside ? last_ids[pix_id] : 0;
+
+    // df/d_out for this pixel
+    float v_render_c[CDIM];
+#pragma unroll
+    for (uint32_t k = 0; k < CDIM; ++k) {
+        v_render_c[k] = v_render_colors[pix_id * CDIM + k];
+    }
+    const float v_render_a = v_render_alphas[pix_id];
+
+    cg::thread_block_tile<GSPLAT_WARP_SIZE> warp =
+        cg::tiled_partition<GSPLAT_WARP_SIZE>(block);
+    const uint32_t lane = warp.thread_rank();
+
+    __shared__ typename rocprim::warp_reduce<int32_t, GSPLAT_WARP_SIZE>::storage_type
+        bin_storage[1];
+    rocprim::warp_reduce<int32_t, GSPLAT_WARP_SIZE> bin_reduce;
+    int32_t warp_bin_final;
+    bin_reduce.reduce(
+        bin_final, warp_bin_final, bin_storage[0], rocprim::maximum<int32_t>());
+
+    int32_t _id_batch;
+    vec3 _xy_opacity_batch;
+    vec3 _conic_batch;
+    for (uint32_t b = 0; b < num_batches; ++b) {
+        warp.sync();
+
+        // one wave of 32 lanes loads 32 gaussians (each once, no duplication)
+        const int64_t batch_end = range_end - 1 - max_batch_size * b;
+        const uint32_t current_batch_size =
+            (uint32_t)min((int64_t)max_batch_size, batch_end + 1 - range_start);
+        const int64_t idx = batch_end - lane;
+        if (lane < current_batch_size && idx >= range_start) {
+            int32_t g = flatten_ids[idx];
+            _id_batch = g;
+            const vec2 xy = means2d[g];
+            const float opac = opacities[g];
+            _xy_opacity_batch = {xy.x, xy.y, opac};
+            _conic_batch = conics[g];
+#pragma unroll
+            for (uint32_t k = 0; k < CDIM; ++k) {
+                rgbs_batch[lane * CDIM + k] = colors[g * CDIM + k];
+            }
+        }
+        warp.sync();
+
+        for (uint32_t t = max(0, batch_end - warp_bin_final);
+             t < current_batch_size; ++t) {
+            bool valid = inside;
+            if (batch_end - t > bin_final) {
+                valid = false;
+            }
+            // broadcast gaussian t (held by lane t) to every lane in the wave
+            vec3 conic;
+            conic.x = warp.shfl(_conic_batch.x, t);
+            conic.y = warp.shfl(_conic_batch.y, t);
+            conic.z = warp.shfl(_conic_batch.z, t);
+            vec3 xy_opac;
+            xy_opac.x = warp.shfl(_xy_opacity_batch.x, t);
+            xy_opac.y = warp.shfl(_xy_opacity_batch.y, t);
+            xy_opac.z = warp.shfl(_xy_opacity_batch.z, t);
+            float alpha;
+            float opac;
+            vec2 delta;
+            float vis;
+            if (valid) {
+                opac = xy_opac.z;
+                delta = {xy_opac.x - px, xy_opac.y - py};
+                float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                      conic.z * delta.y * delta.y) +
+                              conic.y * delta.x * delta.y;
+                vis = __expf(-sigma);
+                alpha = min(0.999f, opac * vis);
+                if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
+                    valid = false;
+                }
+            }
+
+            // if all threads are inactive in this warp, skip this loop
+            if (!warp.any(valid)) {
+                continue;
+            }
+            float v_rgb_local[CDIM] = {0.f};
+            vec3 v_conic_local = {0.f, 0.f, 0.f};
+            vec2 v_xy_local = {0.f, 0.f};
+            vec2 v_xy_abs_local = {0.f, 0.f};
+            float v_opacity_local = 0.f;
+            if (valid) {
+                float ra = 1.0f / (1.0f - alpha);
+                T *= ra;
+                const float fac = alpha * T;
+#pragma unroll
+                for (uint32_t k = 0; k < CDIM; ++k) {
+                    v_rgb_local[k] = fac * v_render_c[k];
+                }
+                float v_alpha = 0.f;
+#pragma unroll
+                for (uint32_t k = 0; k < CDIM; ++k) {
+                    v_alpha += (rgbs_batch[t * CDIM + k] * T - buffer[k] * ra) *
+                               v_render_c[k];
+                }
+                v_alpha += T_final * ra * v_render_a;
+                if (backgrounds != nullptr) {
+                    float accum = 0.f;
+#pragma unroll
+                    for (uint32_t k = 0; k < CDIM; ++k) {
+                        accum += backgrounds[k] * v_render_c[k];
+                    }
+                    v_alpha += -T_final * ra * accum;
+                }
+                if (opac * vis <= 0.999f) {
+                    const float v_sigma = -opac * vis * v_alpha;
+                    v_conic_local = {
+                        0.5f * v_sigma * delta.x * delta.x,
+                        v_sigma * delta.x * delta.y,
+                        0.5f * v_sigma * delta.y * delta.y
+                    };
+                    v_xy_local = {
+                        v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                        v_sigma * (conic.y * delta.x + conic.z * delta.y)
+                    };
+                    if (v_means2d_abs != nullptr) {
+                        v_xy_abs_local = {abs(v_xy_local.x), abs(v_xy_local.y)};
+                    }
+                    v_opacity_local = vis * v_alpha;
+                }
+#pragma unroll
+                for (uint32_t k = 0; k < CDIM; ++k) {
+                    buffer[k] += rgbs_batch[t * CDIM + k] * fac;
+                }
+            }
+
+            // single 32-lane rocprim (DPP) reduction across the whole tile
+            rocprim_warpSum<CDIM, GSPLAT_WARP_SIZE>(v_rgb_local, warp_storage_base);
+            rocprim_warpSum<GSPLAT_WARP_SIZE>(v_conic_local, warp_storage_base);
+            rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_local, warp_storage_base);
+            if (v_means2d_abs != nullptr)
+                rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_abs_local, warp_storage_base);
+            rocprim_warpSum<GSPLAT_WARP_SIZE>(v_opacity_local, warp_storage_base);
+
+            int32_t g = warp.shfl(_id_batch, t);
+            if (lane == 0) { // one atomicAdd set per gaussian per tile
+                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
+#pragma unroll
+                for (uint32_t k = 0; k < CDIM; ++k) {
+                    atomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
+                }
+
+                float *v_conic_ptr = (float *)(v_conics) + 3 * g;
+                atomicAdd(v_conic_ptr, v_conic_local.x);
+                atomicAdd(v_conic_ptr + 1, v_conic_local.y);
+                atomicAdd(v_conic_ptr + 2, v_conic_local.z);
+
+                float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
+                atomicAdd(v_xy_ptr, v_xy_local.x);
+                atomicAdd(v_xy_ptr + 1, v_xy_local.y);
+
+                if (v_means2d_abs != nullptr) {
+                    float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
+                    atomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
+                    atomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
+                }
+
+                atomicAdd(v_opacities + g, v_opacity_local);
+            }
+        }
+    }
+}
+
+#endif
+
+template <uint32_t CDIM, typename scalar_t>
+__global__ void rasterize_to_pixels_3dgs_bwd_kernel(
+    const uint32_t I,
+    const uint32_t N,
+    const uint32_t n_isects,
+    const bool packed,
+    // fwd inputs
+    const vec2 *__restrict__ means2d,         // [..., N, 2] or [nnz, 2]
+    const vec3 *__restrict__ conics,          // [..., N, 3] or [nnz, 3]
+    const scalar_t *__restrict__ colors,      // [..., N, CDIM] or [nnz, CDIM]
+    const scalar_t *__restrict__ opacities,   // [..., N] or [nnz]
+    const scalar_t *__restrict__ backgrounds, // [..., CDIM] or [nnz, CDIM]
+    const bool *__restrict__ masks,           // [..., tile_height, tile_width]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
+    const uint32_t tile_width,
+    const uint32_t tile_height,
+    const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
+    const int32_t *__restrict__ flatten_ids,  // [n_isects]
+    // fwd outputs
+    const scalar_t
+        *__restrict__ render_alphas,      // [..., image_height, image_width, 1]
+    const int32_t *__restrict__ last_ids, // [..., image_height, image_width]
+    // grad outputs
+    const scalar_t *__restrict__ v_render_colors, // [..., image_height,
+                                                  // image_width, CDIM]
+    const scalar_t
+        *__restrict__ v_render_alphas, // [..., image_height, image_width, 1]
+    // grad inputs
+    vec2 *__restrict__ v_means2d_abs,  // [..., N, 2] or [nnz, 2]
+    vec2 *__restrict__ v_means2d,      // [..., N, 2] or [nnz, 2]
+    vec3 *__restrict__ v_conics,       // [..., N, 3] or [nnz, 3]
+    scalar_t *__restrict__ v_colors,   // [..., N, CDIM] or [nnz, CDIM]
+    scalar_t *__restrict__ v_opacities, // [..., N] or [nnz]
+    const uint32_t max_batch_size
+) {
+    auto block = cg::this_thread_block();
+    uint32_t image_id = block.group_index().x;
+    uint32_t tile_id =
+        block.group_index().y * tile_width + block.group_index().z;
+    uint32_t i = block.group_index().y * tile_size_h + block.thread_index().y;
     uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
 
     tile_offsets += image_id * tile_height * tile_width;
@@ -1364,7 +1655,8 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
@@ -1391,13 +1683,13 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
 
     // Each block covers a tile on the image. In total there are
     // I * tile_height * tile_width blocks.
-    dim3 threads = {tile_size, tile_size, 1};
+    dim3 threads = {tile_size, tile_size_h, 1};
     dim3 grid = {I, tile_height, tile_width};
 
 #if USE_ROCM
     // Optimization for ROCm: Use smaller batch size to reduce shared memory usage
 
-    const uint32_t block_size = tile_size * tile_size;
+    const uint32_t block_size = tile_size * tile_size_h;
     uint32_t max_batch_size;
     int64_t shmem_size;
 #if GSPLAT_USE_WAVE64
@@ -1413,13 +1705,29 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     } else
 #else
     // wave32 register+shfl path (1-wave): an 8x8 tile is handled by a SINGLE
-    // 32-lane wave with 2 pixels per lane. Batch data lives in registers (no
-    // dynamic shared mem); the block is launched with 32 threads. Gated to small
-    // CDIM so the doubled per-pixel register state does not spill.
+    // 32-lane wave with 2 pixels per lane. means2d/opacity/conic live in
+    // registers (broadcast via shfl); the color batch (s_rgbs) and per-pixel
+    // v_render_colors gradient (s_vrc) are staged in dynamic LDS to reduce VGPR
+    // pressure. The block is launched with 32 threads. Gated to small CDIM so
+    // the doubled per-pixel register state does not spill.
     if (block_size == 64 && CDIM <= 32) {
       max_batch_size = GSPLAT_WARP_SIZE; // 32
-      shmem_size = 0;
+      // LDS: colors batch [max_batch_size*CDIM] + per-pixel v_render_c
+      // [2*GSPLAT_WARP_SIZE*CDIM] + per-pixel accumulator [2*GSPLAT_WARP_SIZE*CDIM]
+      // (64 pixels/tile).
+      shmem_size = (int64_t)GSPLAT_WARP_SIZE * CDIM * sizeof(float)       // s_rgbs
+                 + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)   // s_vrc
+                 + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float);  // s_buf
       threads = dim3{GSPLAT_WARP_SIZE, 1, 1}; // one wave, 2 px/thread
+    } else if (block_size == 32 && CDIM <= 32) {
+      // wave32 1:1 path: a single 32-lane wave covers a 32-pixel (e.g. 8x4)
+      // tile with one pixel per lane. Only the color batch lives in dynamic LDS
+      // (plus one rocprim warp_reduce storage object); everything else is in
+      // registers. Launched with the default 2D {tile_size, tile_size_h} block.
+      max_batch_size = GSPLAT_WARP_SIZE; // 32
+      shmem_size =
+        (int64_t)max_batch_size * CDIM * sizeof(float)
+        + (int64_t)sizeof(typename rocprim::warp_reduce<float, GSPLAT_WARP_SIZE>::storage_type);
     } else
 #endif
     {
@@ -1471,11 +1779,15 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         KERNEL = rasterize_bs64_to_pixels_3dgs_bwd_kernel<CDIM, float>;
     }
 #else
-    // if constexpr keeps the register-heavy 1-wave kernel from being instantiated
-    // for large CDIM (where the launcher never selects it anyway)
+    // Wave32: default to the generic multi-warp kernel. Use a single-wave
+    // register+shfl kernel for small CDIM:
+    //   * block_size==64 (square 8x8): 1 wave, 2 px/lane.
+    //   * block_size==32 (e.g. 8x4):   1 wave, 1 px/lane (true bs64 analog).
     if constexpr (CDIM <= 32) {
         if (block_size == 64) {
             KERNEL = rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel<CDIM, float>;
+        } else if (block_size == 32) {
+            KERNEL = rasterize_bs32_1to1_to_pixels_3dgs_bwd_kernel<CDIM, float>;
         }
     }
 #endif
@@ -1508,6 +1820,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
             image_width,
             image_height,
             tile_size,
+            tile_size_h,
             tile_width,
             tile_height,
             tile_offsets.data_ptr<int64_t>(),
@@ -1543,6 +1856,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         uint32_t image_width,                                                  \
         uint32_t image_height,                                                 \
         uint32_t tile_size,                                                    \
+        uint32_t tile_size_h,                                                  \
         const at::Tensor tile_offsets,                                         \
         const at::Tensor flatten_ids,                                          \
         const at::Tensor render_alphas,                                        \

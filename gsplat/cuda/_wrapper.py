@@ -447,6 +447,7 @@ def isect_tiles(
     tile_size: int,
     tile_width: int,
     tile_height: int,
+    tile_size_h: Optional[int] = None,
     sort: bool = True,
     segmented: bool = False,
     packed: bool = False,
@@ -501,6 +502,8 @@ def isect_tiles(
         assert radii.shape == image_dims + (N, 2), radii.shape
         assert depths.shape == image_dims + (N,), depths.shape
 
+    if tile_size_h is None:
+        tile_size_h = tile_size
     tiles_per_gauss, isect_ids, flatten_ids = _make_lazy_cuda_func("intersect_tile")(
         means2d.contiguous(),
         radii.contiguous(),
@@ -509,6 +512,7 @@ def isect_tiles(
         gaussian_ids,
         I,
         tile_size,
+        tile_size_h,
         tile_width,
         tile_height,
         sort,
@@ -554,6 +558,7 @@ def rasterize_to_pixels(
     masks: Optional[Tensor] = None,  # [..., tile_height, tile_width]
     packed: bool = False,
     absgrad: bool = False,
+    tile_size_h: Optional[int] = None,  # tile height in px; defaults to tile_size (square)
 ) -> Tuple[Tensor, Tensor]:
     """Rasterizes Gaussians to pixels.
 
@@ -647,10 +652,12 @@ def rasterize_to_pixels(
     else:
         padded_channels = 0
 
+    if tile_size_h is None:
+        tile_size_h = tile_size
     tile_height, tile_width = isect_offsets.shape[-2:]
     assert (
-        tile_height * tile_size >= image_height
-    ), f"Assert Failed: {tile_height} * {tile_size} >= {image_height}"
+        tile_height * tile_size_h >= image_height
+    ), f"Assert Failed: {tile_height} * {tile_size_h} >= {image_height}"
     assert (
         tile_width * tile_size >= image_width
     ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
@@ -668,6 +675,7 @@ def rasterize_to_pixels(
         isect_offsets.contiguous(),
         flatten_ids.contiguous(),
         absgrad,
+        tile_size_h,
     )
 
     if padded_channels > 0:
@@ -1266,6 +1274,7 @@ class _RasterizeToPixels(torch.autograd.Function):
         isect_offsets: Tensor,  # [..., tile_height, tile_width]
         flatten_ids: Tensor,  # [n_isects]
         absgrad: bool,
+        tile_size_h: int,
     ) -> Tuple[Tensor, Tensor]:
         render_colors, render_alphas, last_ids = _make_lazy_cuda_func(
             "rasterize_to_pixels_3dgs_fwd"
@@ -1279,6 +1288,7 @@ class _RasterizeToPixels(torch.autograd.Function):
             width,
             height,
             tile_size,
+            tile_size_h,
             isect_offsets,
             flatten_ids,
         )
@@ -1298,6 +1308,7 @@ class _RasterizeToPixels(torch.autograd.Function):
         ctx.width = width
         ctx.height = height
         ctx.tile_size = tile_size
+        ctx.tile_size_h = tile_size_h
         ctx.absgrad = absgrad
 
         # double to float
@@ -1325,6 +1336,7 @@ class _RasterizeToPixels(torch.autograd.Function):
         width = ctx.width
         height = ctx.height
         tile_size = ctx.tile_size
+        tile_size_h = ctx.tile_size_h
         absgrad = ctx.absgrad
 
         (
@@ -1343,6 +1355,7 @@ class _RasterizeToPixels(torch.autograd.Function):
             width,
             height,
             tile_size,
+            tile_size_h,
             isect_offsets,
             flatten_ids,
             render_alphas,
@@ -1368,13 +1381,14 @@ class _RasterizeToPixels(torch.autograd.Function):
             v_colors,
             v_opacities,
             v_backgrounds,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            None,  # masks
+            None,  # width
+            None,  # height
+            None,  # tile_size
+            None,  # isect_offsets
+            None,  # flatten_ids
+            None,  # absgrad
+            None,  # tile_size_h
         )
 
 

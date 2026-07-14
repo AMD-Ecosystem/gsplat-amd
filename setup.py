@@ -198,7 +198,9 @@ def get_extensions():
         else:
             extra_compile_args = {"cxx": ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment"]}
 
-        extra_link_args = ["-s"]
+        # Normally strip symbols (-s). When inspecting kernel resource usage,
+        # keep symbols so the code object can be read back after the build.
+        extra_link_args = [] if os.getenv("KERNEL_RESOURCE_USAGE", "0") == "1" else ["-s"]
 
         # Compile with OpenMP
         extra_compile_args["cxx"] += ["-DAT_PARALLEL_OPENMP"]
@@ -213,10 +215,25 @@ def get_extensions():
         # dominated by gradient atomicAdds; on wave32 (gfx1250) the atomic count
         # is already doubled vs wave64, so fast HW atomics matter even more.
         hipcc_flags += ["-munsafe-fp-atomics"]
+        # Opt-in: print per-kernel VGPR/SGPR/spill/LDS/occupancy at compile time.
+        # Build with KERNEL_RESOURCE_USAGE=1 and read the remarks in the build log.
+        if os.getenv("KERNEL_RESOURCE_USAGE", "0") == "1":
+            hipcc_flags += ["-Rpass-analysis=kernel-resource-usage"]
         if WITH_SYMBOLS:
             hipcc_flags += ["-g", "-ggdb" , "-O0"]
         else:
             hipcc_flags += ["-O3" ]
+        # Opt-in: dump per-arch intermediate files (.s/.bc/.ll) next to the
+        # object files so the generated ISA can be inspected. Build with
+        # SAVE_TEMPS=1 and look for *-hip-amdgcn-amd-amdhsa-<arch>.s.
+        if os.getenv("SAVE_TEMPS", "0") == "1":
+            hipcc_flags += ["--save-temps=obj"]
+        # Opt-in (wave32 only): replace the LDS-unit cross-lane reduction
+        # (ds_swizzle/ds_bpermute emitted by rocprim::warp_reduce on gfx1250)
+        # with a DPP-intra16 + v_readlane cross-16 all-reduce. Build with
+        # DPP_WARPSUM=1 to A/B against the rocprim path.
+        if os.getenv("DPP_WARPSUM", "0") == "1":
+            hipcc_flags += ["-DGSPLAT_DPP_WARPSUM=1"]
         if LINE_INFO:
             hipcc_flags += ["-gline-tables-only"]
         if torch.version.hip:

@@ -47,6 +47,7 @@ def rasterization(
     sh_degree: Optional[int] = None,
     packed: bool = True,
     tile_size: int = 8, #Changed from 16 to 8 tile size as 8 has better performance on AMD GPUs
+    tile_size_h: Optional[int] = None,  # tile height in px; defaults to tile_size (square). Set e.g. 4 with tile_size=8 for 8x4 wave32 tiles.
     backgrounds: Optional[Tensor] = None,
     render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED"] = "RGB",
     sparse_grad: bool = False,
@@ -628,9 +629,12 @@ def rasterization(
     else:  # RGB
         pass
 
-    # Identify intersecting tiles
+    # Identify intersecting tiles. tile_size is the tile WIDTH in pixels;
+    # tile_size_h is the tile HEIGHT in pixels (defaults to tile_size => square).
+    if tile_size_h is None:
+        tile_size_h = tile_size
     tile_width = math.ceil(width / float(tile_size))
-    tile_height = math.ceil(height / float(tile_size))
+    tile_height = math.ceil(height / float(tile_size_h))
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
         radii,
@@ -638,6 +642,7 @@ def rasterization(
         tile_size,
         tile_width,
         tile_height,
+        tile_size_h=tile_size_h,
         segmented=segmented,
         packed=packed,
         n_images=I,
@@ -659,10 +664,20 @@ def rasterization(
             "width": width,
             "height": height,
             "tile_size": tile_size,
+            "tile_size_h": tile_size_h,
             "n_batches": B,
             "n_cameras": C,
         }
     )
+
+    # Non-square (rectangular) tiles are currently only supported by the
+    # standard 2D rasterizer path; the eval3d (world-space) path assumes square
+    # tiles.
+    if with_eval3d and tile_size_h != tile_size:
+        raise ValueError(
+            "with_eval3d=True does not support non-square tiles "
+            f"(got tile_size={tile_size}, tile_size_h={tile_size_h})."
+        )
 
     # print("rank", world_rank, "Before rasterize_to_pixels")
     if colors.shape[-1] > channel_chunk:
@@ -713,6 +728,7 @@ def rasterization(
                     backgrounds=backgrounds_chunk,
                     packed=packed,
                     absgrad=absgrad,
+                    tile_size_h=tile_size_h,
                 )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
@@ -756,6 +772,7 @@ def rasterization(
                 backgrounds=backgrounds,
                 packed=packed,
                 absgrad=absgrad,
+                tile_size_h=tile_size_h,
             )
     if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth

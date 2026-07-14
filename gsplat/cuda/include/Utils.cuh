@@ -260,10 +260,55 @@ inline __device__ void manual_warpSum(float val[N]) {
     }  
 }
 
+#if defined(USE_ROCM) && defined(GSPLAT_DPP_WARPSUM)
+// ---------------------------------------------------------------------------
+// Pure-VALU 32-lane all-reduce (sum) for gfx1250 / wave32.
+//
+// rocprim::warp_reduce<float,32> on gfx1250 lowers the cross-16 reduction step
+// to LDS-unit ops (ds_swizzle_b32 / ds_bpermute_b32), which serialize on the
+// LDS pipe and dominate the SQ_WAIT_INST_LDS stall in the 3DGS backward.
+//
+// gfx1250 (RDNA-family) removed the CDNA cross-16 DPP modes (row_bcast:15/31),
+// so a *pure* DPP 32-lane reduction is impossible. Instead we keep the intra-16
+// reduction on DPP (row_shr ladder) and do the single cross-16 combine +
+// broadcast with v_readlane_b32 (VALU/scalar) -- no LDS unit, hence no
+// SQ_WAIT_INST_LDS. After the DPP ladder lane 0 holds sum(0..15) and lane 16
+// holds sum(16..31); readlane(0)+readlane(16) gives every lane the full sum.
+// ---------------------------------------------------------------------------
+template<int DPP_CTRL>
+__device__ __forceinline__ float dpp_row_shr_add(float v) {
+    int a = __float_as_int(v);
+    // dpp_ctrl / row_mask / bank_mask / bound_ctrl must all be compile-time constants.
+    int t = __builtin_amdgcn_update_dpp(a, a, DPP_CTRL, 0xf, 0xf, false);
+    return v + __int_as_float(t);
+}
+
+__device__ __forceinline__ float dpp_permlane_warpSum32(float v) {
+    // row_shr accumulates each 16-lane row's sum into that row's HIGHEST lane:
+    // after the ladder lane 15 = sum(0..15) and lane 31 = sum(16..31).
+    v = dpp_row_shr_add<0x118>(v); // row_shr:8
+    v = dpp_row_shr_add<0x114>(v); // row_shr:4
+    v = dpp_row_shr_add<0x112>(v); // row_shr:2
+    v = dpp_row_shr_add<0x111>(v); // row_shr:1
+    int vi = __float_as_int(v);
+    float lo = __int_as_float(__builtin_amdgcn_readlane(vi, 15)); // sum(0..15)
+    float hi = __int_as_float(__builtin_amdgcn_readlane(vi, 31)); // sum(16..31)
+    return lo + hi;                                               // full 32-lane sum, all lanes
+}
+#endif
+
 template<int LOGICAL_WARP_SIZE = GSPLAT_WARP_SIZE>
 __device__ inline void rocprim_warpSum_scalar(float& val, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
             warp_storage_base)
 {
+#if defined(USE_ROCM) && defined(GSPLAT_DPP_WARPSUM)
+    if constexpr (LOGICAL_WARP_SIZE == 32) {
+        // VALU-only 32-lane all-reduce; ignores the LDS scratch entirely.
+        (void)warp_storage_base;
+        val = dpp_permlane_warpSum32(val);
+        return;
+    }
+#endif
     using warp_reduce_t = rocprim::warp_reduce<float, LOGICAL_WARP_SIZE>;
     //constexpr int NUM_WARPS = BLOCK_SIZE / LOGICAL_WARP_SIZE;
 

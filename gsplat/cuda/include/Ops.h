@@ -190,7 +190,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
     const at::optional<at::Tensor> image_ids,    // [nnz]
     const at::optional<at::Tensor> gaussian_ids, // [nnz]
     const uint32_t I,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const bool sort,
@@ -231,7 +232,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids   // [n_isects]
@@ -248,7 +250,8 @@ rasterize_to_pixels_3dgs_bwd(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]

@@ -18,7 +18,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
     const at::optional<at::Tensor> image_ids,    // [nnz]
     const at::optional<at::Tensor> gaussian_ids, // [nnz]
     const uint32_t I,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
+    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const bool sort,
@@ -67,6 +68,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
             packed ? gaussian_ids : c10::nullopt,
             I,
             tile_size,
+            tile_size_h,
             tile_width,
             tile_height,
             c10::nullopt, // cum_tiles_per_gauss
@@ -104,6 +106,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> intersect_tile(
             packed ? gaussian_ids : c10::nullopt,
             I,
             tile_size,
+            tile_size_h,
             tile_width,
             tile_height,
             cum_tiles_per_gauss,
