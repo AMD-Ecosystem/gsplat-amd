@@ -234,6 +234,15 @@ def get_extensions():
         # DPP_WARPSUM=1 to A/B against the rocprim path.
         if os.getenv("DPP_WARPSUM", "0") == "1":
             hipcc_flags += ["-DGSPLAT_DPP_WARPSUM=1"]
+        # Opt-in (wave32 only): multi-tile backward rasterizer. A 256-thread
+        # block (8 wave32 waves) rasterizes 8 separate 8x8 tiles (one per wave)
+        # to raise wave occupancy (deep, tile16-like) while keeping the 8x8 tile
+        # granularity of the bs32 path. Gated to small CDIM in-source so the 8x
+        # per-wave LDS fits 64KB. Build with BS32_MULTITILE=1. Must be defined
+        # for BOTH host (launcher shmem/grid sizing) and device compilation.
+        if os.getenv("BS32_MULTITILE", "0") == "1":
+            extra_compile_args["cxx"] += ["-DGSPLAT_BS32_MULTITILE=1"]
+            hipcc_flags += ["-DGSPLAT_BS32_MULTITILE=1"]
         if LINE_INFO:
             hipcc_flags += ["-gline-tables-only"]
         if torch.version.hip:
