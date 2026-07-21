@@ -731,9 +731,10 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
 // tiles, there is NO cross-wave coupling: no block.sync(), no shared batch, and
 // divergent per-wave loop trip counts / early returns are all safe. The point
 // is to supply 8 resident waves per workgroup (deep occupancy, like tile16)
-// while keeping the 8x8 tile granularity of bs32. Per-wave LDS (s_rgbs/s_vrc/
-// s_buf) and rocprim scratch are replicated MT_WARPS times and indexed by
-// warp_id. Gated to small CDIM in the launcher so 8x LDS fits in 64KB.
+// while keeping the 8x8 tile granularity of bs32. Only the color batch (s_rgbs)
+// and rocprim scratch live in LDS (replicated MT_WARPS times, indexed by
+// warp_id); the per-pixel v_render_colors grad and accumulator are kept in
+// per-lane registers (2 px/lane) to minimize LDS and lift occupancy.
 template <uint32_t CDIM, typename scalar_t>
 __launch_bounds__(256)
 __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
@@ -825,16 +826,20 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     float T[2], T_final[2], v_render_a_arr[2];
     int32_t bin_final_arr[2];
 
-    // Per-wave dynamic LDS: MT_WARPS replicas of (s_rgbs | s_vrc | s_buf),
+    // Per-pixel v_render_colors (v_render_c) and the running accumulator
+    // (buffer) are held in per-lane REGISTERS, one set per owned pixel (2
+    // px/lane), instead of LDS. These slots are never accessed cross-lane, so
+    // keeping them in registers removes 2 of the 3 CDIM-scaling LDS terms (and
+    // their MT_WARPS replication), which is what previously forced the small
+    // CDIM cap / low occupancy.
+    float v_render_c[2][CDIM];
+    float buffer[2][CDIM];
+
+    // Per-wave dynamic LDS: MT_WARPS replicas of the color batch (s_rgbs) only,
     // selected by warp_id. Each wave only ever touches its own slab.
-    const size_t per_warp = (size_t)max_batch_size * CDIM      // s_rgbs
-                          + (size_t)2 * GSPLAT_WARP_SIZE * CDIM // s_vrc
-                          + (size_t)2 * GSPLAT_WARP_SIZE * CDIM; // s_buf
+    const size_t per_warp = (size_t)max_batch_size * CDIM; // s_rgbs
     extern __shared__ float s_mem[];
-    float *s_base = s_mem + (size_t)warp_id * per_warp;
-    float *s_rgbs = s_base;
-    float *s_vrc = s_base + (size_t)max_batch_size * CDIM;
-    float *s_buf = s_vrc + (size_t)2 * GSPLAT_WARP_SIZE * CDIM;
+    float *s_rgbs = s_mem + (size_t)warp_id * per_warp;
 
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
@@ -853,8 +858,8 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
         bin_final_arr[s] = inside_arr[s] ? last_ids[pix_id_arr[s]] : 0;
 #pragma unroll
         for (uint32_t k = 0; k < CDIM; ++k) {
-            s_buf[p * CDIM + k] = 0.f;
-            s_vrc[p * CDIM + k] = v_render_colors[pix_id_arr[s] * CDIM + k];
+            buffer[s][k] = 0.f;
+            v_render_c[s][k] = v_render_colors[pix_id_arr[s] * CDIM + k];
         }
         v_render_a_arr[s] = v_render_alphas[pix_id_arr[s]];
     }
@@ -944,9 +949,8 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                     }
                 }
                 if (valid) {
-                    const uint32_t p_s = lane + GSPLAT_WARP_SIZE * (uint32_t)s;
-                    const float *vrc_s = s_vrc + p_s * CDIM;
-                    float *buf_s = s_buf + p_s * CDIM;
+                    const float *vrc_s = v_render_c[s];
+                    float *buf_s = buffer[s];
                     float ra = 1.0f / (1.0f - alpha);
                     T[s] *= ra;
                     const float fac = alpha * T[s];
@@ -2057,15 +2061,17 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
 #if GSPLAT_BS32_MULTITILE
       if constexpr (CDIM <= GSPLAT_BS32_MULTITILE_MAXCDIM) {
       // multi-tile path: a 256-thread block (MT_WARPS == 8 wave32 waves) where
-      // each wave independently rasterizes ONE 8x8 tile (bs32_1wave body). The
-      // per-wave LDS (s_rgbs|s_vrc|s_buf) is replicated MT_WARPS times; the grid
-      // packs MT_WARPS tiles per block. Gated to small CDIM so 8x LDS fits 64KB.
+      // each wave independently rasterizes ONE 8x8 tile (bs32_1wave body). Only
+      // the color batch (s_rgbs) lives in LDS, replicated MT_WARPS times; the
+      // per-pixel v_render_c/buffer are per-lane registers. The grid packs
+      // MT_WARPS tiles per block.
       constexpr uint32_t MT_WARPS = 256u / GSPLAT_WARP_SIZE; // 8
       max_batch_size = GSPLAT_WARP_SIZE; // 32, each wave loads its own batch
+      // Only the color batch (s_rgbs) lives in LDS now; per-pixel v_render_c and
+      // buffer were moved to per-lane registers, cutting LDS ~5x (from
+      // MT_WARPS*160*CDIM to MT_WARPS*32*CDIM floats).
       shmem_size = (int64_t)MT_WARPS *
-        ((int64_t)GSPLAT_WARP_SIZE * CDIM * sizeof(float)         // s_rgbs
-         + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)   // s_vrc
-         + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)); // s_buf
+        ((int64_t)GSPLAT_WARP_SIZE * CDIM * sizeof(float));      // s_rgbs
       threads = dim3{256, 1, 1};
       grid = dim3{I, (tile_height * tile_width + MT_WARPS - 1) / MT_WARPS, 1};
       } else
