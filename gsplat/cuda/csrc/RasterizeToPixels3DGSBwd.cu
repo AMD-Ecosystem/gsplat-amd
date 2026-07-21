@@ -734,7 +734,12 @@ __global__ void rasterize_bs32_1wave_to_pixels_3dgs_bwd_kernel(
 // while keeping the 8x8 tile granularity of bs32. Per-wave LDS (s_rgbs/s_vrc/
 // s_buf) and rocprim scratch are replicated MT_WARPS times and indexed by
 // warp_id. Gated to small CDIM in the launcher so 8x LDS fits in 64KB.
-template <uint32_t CDIM, typename scalar_t>
+//
+// H8: ABSGRAD is a compile-time flag for the v_means2d_abs path. When the caller
+// does not request abs gradients (absgrad=false, the common case) the launcher
+// instantiates ABSGRAD=false, so the abs accumulator, its warp reduction and its
+// atomics are compiled out entirely (no dead registers / VALU / atomics).
+template <uint32_t CDIM, typename scalar_t, bool ABSGRAD>
 __launch_bounds__(256)
 __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     const uint32_t I,
@@ -820,21 +825,25 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
 
     // Each lane owns 2 pixels of this wave's 8x8 tile: p = lane + 32*s, s in {0,1}.
     float px[2], py[2];
-    int32_t pix_id_arr[2];
-    bool inside_arr[2];
-    float T[2], T_final[2], v_render_a_arr[2];
+    float T[2]; // H3: T_final/v_render_alpha moved to LDS (s_tf/s_va)
     int32_t bin_final_arr[2];
 
-    // Per-wave dynamic LDS: MT_WARPS replicas of (s_rgbs | s_vrc | s_buf),
-    // selected by warp_id. Each wave only ever touches its own slab.
+    // Per-wave dynamic LDS: MT_WARPS replicas of (s_rgbs | s_vrc | s_buf | s_tf |
+    // s_va), selected by warp_id. Each wave only ever touches its own slab.
+    // H3: s_tf (T_final) and s_va (v_render_alpha) are per-pixel and read-only
+    // after setup; keeping them in LDS instead of registers trades VGPR for LDS.
     const size_t per_warp = (size_t)max_batch_size * CDIM      // s_rgbs
                           + (size_t)2 * GSPLAT_WARP_SIZE * CDIM // s_vrc
-                          + (size_t)2 * GSPLAT_WARP_SIZE * CDIM; // s_buf
+                          + (size_t)2 * GSPLAT_WARP_SIZE * CDIM // s_buf
+                          + (size_t)2 * GSPLAT_WARP_SIZE        // s_tf
+                          + (size_t)2 * GSPLAT_WARP_SIZE;       // s_va
     extern __shared__ float s_mem[];
     float *s_base = s_mem + (size_t)warp_id * per_warp;
     float *s_rgbs = s_base;
     float *s_vrc = s_base + (size_t)max_batch_size * CDIM;
     float *s_buf = s_vrc + (size_t)2 * GSPLAT_WARP_SIZE * CDIM;
+    float *s_tf = s_buf + (size_t)2 * GSPLAT_WARP_SIZE * CDIM;
+    float *s_va = s_tf + (size_t)2 * GSPLAT_WARP_SIZE;
 
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
@@ -845,18 +854,22 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
         uint32_t j = tcol * tile_size + col;
         px[s] = (float)j + 0.5f;
         py[s] = (float)i + 0.5f;
-        pix_id_arr[s] =
+        // H1: pix_id is dead after this loop -> loop-local, not a kernel-wide array.
+        const int32_t pix_id =
             min(i * image_width + j, image_width * image_height - 1);
-        inside_arr[s] = (i < image_height && j < image_width);
-        T_final[s] = 1.0f - render_alphas[pix_id_arr[s]];
-        T[s] = T_final[s];
-        bin_final_arr[s] = inside_arr[s] ? last_ids[pix_id_arr[s]] : 0;
+        const bool inside = (i < image_height && j < image_width);
+        const float tf_h3 = 1.0f - render_alphas[pix_id];
+        s_tf[p] = tf_h3; T[s] = tf_h3;
+        // H2: outside pixels get bin_final = -1. The inner-loop test
+        // (batch_end - t <= bin_final_arr[s]) is then always false for them,
+        // so a separate kernel-wide inside_arr[2] is no longer needed.
+        bin_final_arr[s] = inside ? last_ids[pix_id] : -1;
 #pragma unroll
         for (uint32_t k = 0; k < CDIM; ++k) {
             s_buf[p * CDIM + k] = 0.f;
-            s_vrc[p * CDIM + k] = v_render_colors[pix_id_arr[s] * CDIM + k];
+            s_vrc[p * CDIM + k] = v_render_colors[pix_id * CDIM + k];
         }
-        v_render_a_arr[s] = v_render_alphas[pix_id_arr[s]];
+        s_va[p] = v_render_alphas[pix_id];
     }
 
     // which gaussians to look through in this tile
@@ -923,10 +936,9 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
 
 #pragma unroll
             for (int s = 0; s < 2; ++s) {
-                bool valid = inside_arr[s];
-                if (batch_end - t > bin_final_arr[s]) {
-                    valid = false;
-                }
+                // H2: inside && (batch_end - t <= bin_final). Outside pixels have
+                // bin_final_arr[s] == -1, so this is false for them (batch_end-t>=0).
+                bool valid = (batch_end - t <= bin_final_arr[s]);
                 float alpha;
                 float opac_s;
                 float vis;
@@ -960,14 +972,14 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                         v_alpha += (s_rgbs[t * CDIM + k] * T[s] - buf_s[k] * ra) *
                                    vrc_s[k];
                     }
-                    v_alpha += T_final[s] * ra * v_render_a_arr[s];
+                    v_alpha += s_tf[p_s] * ra * s_va[p_s];
                     if (backgrounds != nullptr) {
                         float accum = 0.f;
 #pragma unroll
                         for (uint32_t k = 0; k < CDIM; ++k) {
                             accum += backgrounds[k] * vrc_s[k];
                         }
-                        v_alpha += -T_final[s] * ra * accum;
+                        v_alpha += -s_tf[p_s] * ra * accum;
                     }
                     if (opac_s * vis <= 0.999f) {
                         const float v_sigma = -opac_s * vis * v_alpha;
@@ -980,7 +992,7 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                             v_sigma * (conic.y * delta.x + conic.z * delta.y);
                         v_xy_local.x += vxl;
                         v_xy_local.y += vyl;
-                        if (v_means2d_abs != nullptr) {
+                        if constexpr (ABSGRAD) {
                             v_xy_abs_local.x += abs(vxl);
                             v_xy_abs_local.y += abs(vyl);
                         }
@@ -1003,7 +1015,7 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             rocprim_warpSum<CDIM, GSPLAT_WARP_SIZE>(v_rgb_local, sum_storage);
             rocprim_warpSum<GSPLAT_WARP_SIZE>(v_conic_local, sum_storage);
             rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_local, sum_storage);
-            if (v_means2d_abs != nullptr)
+            if constexpr (ABSGRAD)
                 rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_abs_local, sum_storage);
             rocprim_warpSum<GSPLAT_WARP_SIZE>(v_opacity_local, sum_storage);
 
@@ -1024,7 +1036,7 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                 atomicAdd(v_xy_ptr, v_xy_local.x);
                 atomicAdd(v_xy_ptr + 1, v_xy_local.y);
 
-                if (v_means2d_abs != nullptr) {
+                if constexpr (ABSGRAD) {
                     float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
                     atomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
                     atomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
@@ -2065,7 +2077,9 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
       shmem_size = (int64_t)MT_WARPS *
         ((int64_t)GSPLAT_WARP_SIZE * CDIM * sizeof(float)         // s_rgbs
          + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)   // s_vrc
-         + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)); // s_buf
+         + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)   // s_buf
+         + (int64_t)2 * GSPLAT_WARP_SIZE * sizeof(float)          // s_tf  (H3)
+         + (int64_t)2 * GSPLAT_WARP_SIZE * sizeof(float));        // s_va  (H3)
       threads = dim3{256, 1, 1};
       grid = dim3{I, (tile_height * tile_width + MT_WARPS - 1) / MT_WARPS, 1};
       } else
@@ -2153,8 +2167,11 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         if (block_size == 64) {
 #if GSPLAT_BS32_MULTITILE
             if constexpr (CDIM <= GSPLAT_BS32_MULTITILE_MAXCDIM) {
-                KERNEL =
-                    rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel<CDIM, float>;
+                // H8: pick the ABSGRAD instantiation so the abs path is compiled
+                // out when the caller does not request abs gradients.
+                KERNEL = v_means2d_abs.has_value()
+                    ? rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel<CDIM, float, true>
+                    : rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel<CDIM, float, false>;
             } else
 #endif
             {
