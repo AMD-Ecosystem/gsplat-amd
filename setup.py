@@ -23,6 +23,14 @@ def get_rocm_arch():
     Returns:
         str: The gfx code (e.g., 'gfx942', 'gfx90a'), or 'gfx942' as fallback.
     """
+    # Explicit override. rocminfo needs a working /dev/kfd, so on a build host
+    # with no (or a temporarily unavailable) GPU the detection below silently
+    # falls back to gfx942 -- which builds wave64 kernels that will never run on
+    # a wave32 part. Set GSPLAT_GPU_ARCH=gfx1250 to pin it.
+    env_arch = os.environ.get("GSPLAT_GPU_ARCH", "").strip()
+    if env_arch:
+        print(f"GSPLAT_GPU_ARCH override: {env_arch}")
+        return env_arch
     try:
         # Run rocminfo command
         result = subprocess.run(
@@ -243,6 +251,10 @@ def get_extensions():
         if os.getenv("BS32_MULTITILE", "0") == "1":
             extra_compile_args["cxx"] += ["-DGSPLAT_BS32_MULTITILE=1"]
             hipcc_flags += ["-DGSPLAT_BS32_MULTITILE=1"]
+        # Generic extra defines, e.g. GSPLAT_EXTRA_DEFINES="GSPLAT_ATOMIC_CEILING GSPLAT_OPT2"
+        for _d in os.getenv("GSPLAT_EXTRA_DEFINES", "").split():
+            extra_compile_args["cxx"] += ["-D" + _d]
+            hipcc_flags += ["-D" + _d]
         if LINE_INFO:
             hipcc_flags += ["-gline-tables-only"]
         if torch.version.hip:
