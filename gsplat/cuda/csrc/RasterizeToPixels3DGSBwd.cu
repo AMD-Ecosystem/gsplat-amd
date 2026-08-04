@@ -559,10 +559,23 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
         local_bin_final, warp_bin_final, bin_storage[warp_id],
         rocprim::maximum<int32_t>());
 
+    // Batches walk backward from range_end, so the leading ones cover gaussians
+    // further away than warp_bin_final and their inner loop runs zero times --
+    // but the staging below would still issue four scattered global loads per
+    // lane for them. Skip straight to the first batch whose span reaches
+    // warp_bin_final, from the inner loop's own start condition
+    // (batch_end - warp_bin_final < current_batch_size). Using max_batch_size
+    // rather than current_batch_size makes this a lower bound, so a short final
+    // batch can never be skipped by mistake. Wave-uniform, so no divergence.
+    const int32_t past_last_needed = range_end - 1 - warp_bin_final;
+    const uint32_t b_start = past_last_needed > 0
+                                 ? (uint32_t)past_last_needed / max_batch_size
+                                 : 0u;
+
     int32_t _id_batch;
     vec3 _xy_opacity_batch;
     vec3 _conic_batch;
-    for (uint32_t b = 0; b < num_batches; ++b) {
+    for (uint32_t b = b_start; b < num_batches; ++b) {
         warp.sync();
 
         // one wave of 32 lanes loads 32 gaussians (each once, no duplication)
@@ -596,36 +609,60 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             xy_opac.y = warp.shfl(_xy_opacity_batch.y, t);
             xy_opac.z = warp.shfl(_xy_opacity_batch.z, t);
 
+            // Phase 1: evaluate both of this lane's pixels in a single basic
+            // block. Wrapping each pixel in its own `if (valid)` puts them in
+            // separate EXEC-mask regions, and the compiler will not move VALU
+            // across an EXEC write -- which left the two exp chains fully
+            // serialised. The math is pure arithmetic on already-valid floats,
+            // so running it for lanes that turn out invalid is safe; the
+            // results are simply discarded below.
+            bool valid_s[2];
+            float alpha_s[2];
+            float vis_s[2];
+            vec2 delta_s[2];
+            bool any_valid = false;
+#pragma unroll
+            for (int s = 0; s < 2; ++s) {
+                delta_s[s] = {xy_opac.x - px[s], xy_opac.y - py[s]};
+                float sigma =
+                    0.5f * (conic.x * delta_s[s].x * delta_s[s].x +
+                            conic.z * delta_s[s].y * delta_s[s].y) +
+                    conic.y * delta_s[s].x * delta_s[s].y;
+                vis_s[s] = __expf(-sigma);
+                alpha_s[s] = min(0.999f, xy_opac.z * vis_s[s]);
+                // Bitwise `&`, not `&&`: short-circuit evaluation makes the
+                // compiler emit a conditional block for the later operands,
+                // which puts an EXEC write between the two pixels' chains and
+                // reinstates the very barrier this split exists to remove.
+                // None of the operands has side effects, so `&` is equivalent.
+                valid_s[s] = inside_arr[s] &
+                             !(batch_end - t > bin_final_arr[s]) &
+                             !(sigma < 0.f) &
+                             !(alpha_s[s] < ALPHA_THRESHOLD);
+                any_valid |= valid_s[s];
+            }
+
+            // No pixel in this wave needs gaussian t: skip the gradient bodies
+            // and the reduction alike.
+            if (!warp.any(any_valid)) {
+                continue;
+            }
+
             float v_rgb_local[CDIM] = {0.f};
             vec3 v_conic_local = {0.f, 0.f, 0.f};
             vec2 v_xy_local = {0.f, 0.f};
             vec2 v_xy_abs_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
-            bool any_valid = false;
 
+            // Phase 2: gradients. These write per-pixel state, so they keep one
+            // EXEC region each.
 #pragma unroll
             for (int s = 0; s < 2; ++s) {
-                bool valid = inside_arr[s];
-                if (batch_end - t > bin_final_arr[s]) {
-                    valid = false;
-                }
-                float alpha;
-                float opac_s;
-                float vis;
-                vec2 delta;
-                if (valid) {
-                    opac_s = xy_opac.z;
-                    delta = {xy_opac.x - px[s], xy_opac.y - py[s]};
-                    float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                          conic.z * delta.y * delta.y) +
-                                  conic.y * delta.x * delta.y;
-                    vis = __expf(-sigma);
-                    alpha = min(0.999f, opac_s * vis);
-                    if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
-                        valid = false;
-                    }
-                }
-                if (valid) {
+                if (valid_s[s]) {
+                    const float alpha = alpha_s[s];
+                    const float vis = vis_s[s];
+                    const vec2 delta = delta_s[s];
+                    const float opac_s = xy_opac.z;
                     const float *vrc_s = v_render_c[s];
                     float *buf_s = buffer[s];
                     float ra = 1.0f / (1.0f - alpha);
@@ -672,12 +709,6 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                         buf_s[k] += s_rgbs[t * CDIM + k] * fac;
                     }
                 }
-                any_valid |= valid;
-            }
-
-            // skip the (relatively expensive) reduction if no pixel is active
-            if (!warp.any(any_valid)) {
-                continue;
             }
 
             // single 32-lane rocprim (DPP) reduction across this wave's tile
