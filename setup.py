@@ -215,6 +215,14 @@ def get_extensions():
         # dominated by gradient atomicAdds; on wave32 (gfx1250) the atomic count
         # is already doubled vs wave64, so fast HW atomics matter even more.
         hipcc_flags += ["-munsafe-fp-atomics"]
+        # Match the CUDA path, which has always built with nvcc --use_fast_math
+        # (see the nvcc_flags below). The HIP port never carried that across, so
+        # a plain `1.0f / x` compiles to the ~12-instruction IEEE division
+        # sequence (v_div_scale/v_div_fmas/v_div_fixup) instead of a single
+        # v_rcp_f32. In the 3DGS backward that sequence sits on the critical
+        # path of every gaussian, twice per lane. Set FAST_MATH=0 to A/B it.
+        if os.getenv("FAST_MATH", "1") != "0":
+            hipcc_flags += ["-ffast-math"]
         # Opt-in: print per-kernel VGPR/SGPR/spill/LDS/occupancy at compile time.
         # Build with KERNEL_RESOURCE_USAGE=1 and read the remarks in the build log.
         if os.getenv("KERNEL_RESOURCE_USAGE", "0") == "1":
