@@ -16,44 +16,6 @@ namespace gsplat {
 
 namespace cg = cooperative_groups;
 
-#if defined(GSPLAT_ALPHA_FOLD) && !defined(GSPLAT_REG_PIXSTATE)
-#error "GSPLAT_ALPHA_FOLD requires GSPLAT_REG_PIXSTATE"
-#endif
-#if defined(GSPLAT_ALPHA_FOLD) && defined(GSPLAT_TPIPE)
-#error "GSPLAT_ALPHA_FOLD is not implemented in the GSPLAT_TPIPE inner loop"
-#endif
-
-// Uniform-source wave broadcast.
-//
-// `warp.shfl(v, t)` where `t` is wave-uniform compiles to `ds_bpermute_b32` --
-// a full LDS-crossbar permute. Measured on gfx1250, a dependent LDS access
-// costs ~72 cycles, and the bs32_8tile inner loop issues SIX of these
-// back-to-back at the top of every iteration (broadcasting one Gaussian's
-// conic and xy/opacity), all of which must land before the alpha evaluation
-// can begin. The compiler does not recover the uniformity of `t` on its own:
-// it materialises the lane index into a VGPR and takes the crossbar path.
-//
-// `v_readlane_b32` is the right instruction for a uniform lane select: it
-// lands the value in an SGPR, off the LDS pipe entirely, and lets the
-// consuming VALU ops take it as a scalar operand (which also relieves VGPR
-// pressure). The source lane is always active here -- the broadcast follows a
-// warp.sync() with the full wave converged, and the loop bound guarantees lane
-// `t` participated in the batch load.
-__device__ __forceinline__ float wave_bcast_f32(float v, uint32_t src_lane) {
-    return __int_as_float(
-        __builtin_amdgcn_readlane(__float_as_int(v), (int)src_lane));
-}
-__device__ __forceinline__ int32_t wave_bcast_i32(int32_t v, uint32_t src_lane) {
-    return (int32_t)__builtin_amdgcn_readlane(v, (int)src_lane);
-}
-
-#if defined(GSPLAT_READLANE_BCAST)
-#define GSPLAT_BCAST_F(v, t) gsplat::wave_bcast_f32((v), (t))
-#define GSPLAT_BCAST_I(v, t) gsplat::wave_bcast_i32((v), (t))
-#else
-#define GSPLAT_BCAST_F(v, t) warp.shfl((v), (t))
-#define GSPLAT_BCAST_I(v, t) warp.shfl((v), (t))
-#endif
 
 // Wave32 backward kernel selection for the square (block_size==64, 8x8) tile.
 // When 1, use the 2-wave cooperative kernel (64-thread block, 1 px/lane, one
@@ -867,46 +829,24 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     float T[2]; // H3: T_final/v_render_alpha moved to LDS (s_tf/s_va)
     int32_t bin_final_arr[2];
 
-    // Per-wave dynamic LDS: MT_WARPS replicas of (s_rgbs | s_vrc | s_buf | s_tf |
-    // s_va), selected by warp_id. Each wave only ever touches its own slab.
-    // H3: s_tf (T_final) and s_va (v_render_alpha) are per-pixel and read-only
-    // after setup; keeping them in LDS instead of registers trades VGPR for LDS.
+    // NO dynamic LDS in the inner loop.
     //
-    // GSPLAT_REG_PIXSTATE / GSPLAT_REG_BUF: s_vrc, s_tf, s_va and s_buf are
-    // indexed ONLY by this lane's own pixel (p = lane + 32*s) -- they are never
-    // read across lanes, so LDS buys nothing but latency. Worse, the compiler
-    // cannot prove the s_buf stores do not alias s_vrc/s_tf/s_va (all are
-    // offsets into the same `extern __shared__` array), so the loop-INVARIANT
-    // s_vrc/s_tf/s_va reads are re-issued on every inner iteration. Promoting
-    // them to registers removes those ds_loads at a cost in VGPRs. Only s_rgbs
-    // is genuinely shared (lane t's colour broadcast to the whole wave).
-#if defined(GSPLAT_REG_PIXSTATE)
+    // This kernel used to stage four arrays in shared memory -- s_vrc
+    // (v_render_colors), s_tf (T_final), s_va (v_render_alpha) and s_buf (the
+    // colour accumulator). All four are indexed ONLY by this lane's own pixel
+    // (p = lane + 32*s); none is ever read across lanes, so LDS bought nothing
+    // but latency. Worse, the compiler could not prove the s_buf stores did not
+    // alias the others (all were offsets into the same `extern __shared__`
+    // array), so the loop-INVARIANT reads were re-issued every inner iteration.
+    //
+    // They now live in registers (r_vrc / r_tf / r_va below), the colour
+    // accumulator collapses to the scalar r_sdot, and Gaussian colours are
+    // broadcast with warp.shfl exactly as conic and xy/opacity already were.
+    // Measured: LDS instructions 46 -> 12, SQ_INSTS_LDS -39.7%, SQ_WAIT_ANY
+    // -23.8%, kernel 2.937 -> 2.541 ms mean (-13.5%). Memory traffic is
+    // unchanged to the byte -- this moved where data lives, not how much moves.
     float r_vrc[2][CDIM];
-#if defined(GSPLAT_ALPHA_FOLD)
-    // ---- 4C: fold T_final, v_render_alpha and the background term into one --
-    //
-    // The inner loop does
-    //     v_alpha += tf*ra*va;   if (backgrounds) v_alpha += -tf*ra*accum;
-    // with accum = sum_k backgrounds[k]*vrc_k. All three of tf, va and accum
-    // are PER-PIXEL CONSTANTS -- none depends on the Gaussian index t -- and
-    // the two terms collapse:
-    //     tf*ra*va - tf*ra*accum = (tf*(va - accum)) * ra
-    // So precompute tfva := tf*(va-accum) once per pixel in setup. Two live
-    // registers become one, the runtime `backgrounds != nullptr` branch and its
-    // CDIM-long dot product leave the inner loop entirely, and the per-
-    // (pixel, Gaussian) cost drops from two multiplies to one.
-    float r_tfva[2];
-#else
     float r_tf[2], r_va[2];
-#endif
-#endif
-#if defined(GSPLAT_REG_BUF)
-    float r_buf[2][CDIM];
-#endif
-#if defined(GSPLAT_BUF_DOT) && defined(GSPLAT_TPIPE)
-#error "GSPLAT_BUF_DOT is not implemented in the GSPLAT_TPIPE inner loop"
-#endif
-#if defined(GSPLAT_BUF_DOT)
     // ---- 4C: collapse the CDIM-vector colour accumulator to ONE scalar ----
     //
     // `buf_k` accumulates sum_over_processed_gaussians rgb_k * fac, and is only
@@ -924,47 +864,6 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     // NOT bit-identical: the summation is reassociated, so this must clear the
     // golden-gradient tolerance gate rather than match exactly.
     float r_sdot[2] = {0.f, 0.f};
-#endif
-    const size_t per_warp =
-#if !defined(GSPLAT_RGB_SHFL)
-                            (size_t)max_batch_size * CDIM      // s_rgbs
-#else
-                            (size_t)0
-#endif
-#if !defined(GSPLAT_REG_PIXSTATE)
-                          + (size_t)2 * GSPLAT_WARP_SIZE * CDIM // s_vrc
-#endif
-#if !defined(GSPLAT_REG_BUF) && !defined(GSPLAT_BUF_DOT)
-                          + (size_t)2 * GSPLAT_WARP_SIZE * CDIM // s_buf
-#endif
-#if !defined(GSPLAT_REG_PIXSTATE)
-                          + (size_t)2 * GSPLAT_WARP_SIZE        // s_tf
-                          + (size_t)2 * GSPLAT_WARP_SIZE        // s_va
-#endif
-                          ;
-    extern __shared__ float s_mem[];
-    float *s_base = s_mem + (size_t)warp_id * per_warp;
-#if !defined(GSPLAT_RGB_SHFL)
-    float *s_rgbs = s_base;
-    float *s_cur = s_base + (size_t)max_batch_size * CDIM;
-#else
-    float *s_cur = s_base;
-#endif
-#if !defined(GSPLAT_REG_PIXSTATE)
-    float *s_vrc = s_cur;
-    s_cur += (size_t)2 * GSPLAT_WARP_SIZE * CDIM;
-#endif
-#if !defined(GSPLAT_REG_BUF) && !defined(GSPLAT_BUF_DOT)
-    float *s_buf = s_cur;
-    s_cur += (size_t)2 * GSPLAT_WARP_SIZE * CDIM;
-#endif
-#if !defined(GSPLAT_REG_PIXSTATE)
-    float *s_tf = s_cur;
-    s_cur += (size_t)2 * GSPLAT_WARP_SIZE;
-    float *s_va = s_cur;
-    s_cur += (size_t)2 * GSPLAT_WARP_SIZE;
-#endif
-    (void)s_cur;
 
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
@@ -980,13 +879,7 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             min(i * image_width + j, image_width * image_height - 1);
         const bool inside = (i < image_height && j < image_width);
         const float tf_h3 = 1.0f - render_alphas[pix_id];
-#if defined(GSPLAT_REG_PIXSTATE) && defined(GSPLAT_ALPHA_FOLD)
-        /* folded below, once vrc is loaded */
-#elif defined(GSPLAT_REG_PIXSTATE)
         r_tf[s] = tf_h3;
-#else
-        s_tf[p] = tf_h3;
-#endif
         T[s] = tf_h3;
         // H2: outside pixels get bin_final = -1. The inner-loop test
         // (batch_end - t <= bin_final_arr[s]) is then always false for them,
@@ -994,34 +887,10 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
         bin_final_arr[s] = inside ? last_ids[pix_id] : -1;
 #pragma unroll
         for (uint32_t k = 0; k < CDIM; ++k) {
-#if defined(GSPLAT_BUF_DOT)
             /* r_sdot replaces the whole buf accumulator */
-#elif defined(GSPLAT_REG_BUF)
-            r_buf[s][k] = 0.f;
-#else
-            s_buf[p * CDIM + k] = 0.f;
-#endif
-#if defined(GSPLAT_REG_PIXSTATE)
             r_vrc[s][k] = v_render_colors[pix_id * CDIM + k];
-#else
-            s_vrc[p * CDIM + k] = v_render_colors[pix_id * CDIM + k];
-#endif
         }
-#if defined(GSPLAT_REG_PIXSTATE) && defined(GSPLAT_ALPHA_FOLD)
-        {
-            float accum_bg = 0.f;
-            if (backgrounds != nullptr) {
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k)
-                    accum_bg += backgrounds[k] * r_vrc[s][k];
-            }
-            r_tfva[s] = tf_h3 * (v_render_alphas[pix_id] - accum_bg);
-        }
-#elif defined(GSPLAT_REG_PIXSTATE)
         r_va[s] = v_render_alphas[pix_id];
-#else
-        s_va[p] = v_render_alphas[pix_id];
-#endif
     }
 
     // which gaussians to look through in this tile
@@ -1031,14 +900,6 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             ? n_isects
             : tile_offsets[tile_id + 1];
 
-#if defined(GSPLAT_PROBE_MAXLIST)
-    // PHASE-2.5 ABLATION (results intentionally WRONG -- timing only).
-    // Cap every tile's Gaussian list to the last GSPLAT_PROBE_MAXLIST entries
-    // (the kernel walks back-to-front from range_end). Sweeping the cap and
-    // fitting kernel time vs cap separates the per-(tile,Gaussian) loop-body
-    // cost (slope) from per-tile setup + traversal cost (intercept at cap 0).
-    range_start = max(range_start, range_end - (int32_t)(GSPLAT_PROBE_MAXLIST));
-#endif
 
     const uint32_t num_batches =
         (range_end - range_start + max_batch_size - 1) / max_batch_size;
@@ -1054,74 +915,11 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     int32_t _id_batch;
     vec3 _xy_opacity_batch;
     vec3 _conic_batch;
-#if defined(GSPLAT_RGB_SHFL)
     // Colours held per-lane and broadcast with warp.shfl, exactly as conic and
     // xy_opacity already are, instead of round-tripping through LDS. Removes
     // the last genuinely shared LDS array from the inner loop.
     float _rgb_batch[CDIM];
-#endif
-#if defined(GSPLAT_PROBE_COALESCED_LOAD) || defined(GSPLAT_PROBE_GATHER2)
-    // largest (2^k - 1) < N, computed once so the probe's per-lane cost is a
-    // single v_and_b32 rather than a division sequence.
-    const uint32_t ls_probe_mask = (N > 1u) ? ((1u << (31 - __builtin_clz(N))) - 1u) : 0u;
-#endif
-#if defined(GSPLAT_BATCH_PREFETCH)
-    // ---- 4C(MLP): double-buffered attribute gather ------------------------
-    //
-    // The unmodified loop is  sync -> gather 32 Gaussians -> sync -> process
-    // 32 Gaussians. That second sync is a hard serialisation: one whole memory
-    // round-trip is exposed per 32 Gaussians with no compute overlapping it.
-    // Phase 2's control-flow-exact GATHER2 probe put the marginal cost of one
-    // extra attribute gather at +13.2%, i.e. the gather latency is measurably
-    // NOT hidden today.
-    //
-    // Here batch b+1's four loads are ISSUED before batch b's inner loop runs.
-    // AMD's explicit wait counters do the rest: the loads issue early and the
-    // s_waitcnt sinks to their first use, which is ~32 Gaussians of arithmetic
-    // later. Requires GSPLAT_RGB_SHFL -- with colours staged in LDS the batch
-    // would need a double-buffered s_rgbs and the syncs could not be dropped.
-#if !defined(GSPLAT_RGB_SHFL)
-#error "GSPLAT_BATCH_PREFETCH requires GSPLAT_RGB_SHFL (colours must be in registers)"
-#endif
-    int32_t pf_id = 0;
-    vec3 pf_xyo = {0.f, 0.f, 0.f};
-    vec3 pf_cn = {0.f, 0.f, 0.f};
-    float pf_rgb[CDIM] = {0.f};
-    auto issue_load = [&](uint32_t bb) {
-        const int64_t be = range_end - 1 - (int64_t)max_batch_size * bb;
-        const uint32_t cbs =
-            (uint32_t)min((int64_t)max_batch_size, be + 1 - range_start);
-        const int64_t ix = be - lane;
-        if (lane < cbs && ix >= range_start) {
-            const int32_t g = flatten_ids[ix];
-            pf_id = g;
-            const vec2 xy = means2d[g];
-            const float opac = opacities[g];
-            pf_xyo = {xy.x, xy.y, opac};
-            pf_cn = conics[g];
-#pragma unroll
-            for (uint32_t k = 0; k < CDIM; ++k) pf_rgb[k] = colors[g * CDIM + k];
-        }
-    };
-    if (num_batches > 0) issue_load(0);
-#endif
     for (uint32_t b = 0; b < num_batches; ++b) {
-#if defined(GSPLAT_BATCH_PREFETCH)
-        // Adopt last iteration's prefetch (this is where its s_waitcnt lands),
-        // then immediately issue the next batch's loads.
-        _id_batch = pf_id;
-        _xy_opacity_batch = pf_xyo;
-        _conic_batch = pf_cn;
-#pragma unroll
-        for (uint32_t k = 0; k < CDIM; ++k) _rgb_batch[k] = pf_rgb[k];
-        const int64_t batch_end = range_end - 1 - (int64_t)max_batch_size * b;
-        const uint32_t current_batch_size =
-            (uint32_t)min((int64_t)max_batch_size, batch_end + 1 - range_start);
-        if (b + 1u < num_batches) issue_load(b + 1u);
-        // No warp.sync(): nothing crosses lanes through memory here. Colours
-        // live in registers and every cross-lane read in the t-loop is a
-        // convergent shfl/readlane, not an LDS round-trip.
-#else
         warp.sync();
 
         // one wave of 32 lanes loads 32 gaussians (each once, no duplication)
@@ -1132,319 +930,34 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
         if (lane < current_batch_size && idx >= range_start) {
             int32_t g = flatten_ids[idx];
             _id_batch = g;
-#if defined(GSPLAT_PROBE_COALESCED_LOAD)
-            // CEILING PROBE (results intentionally WRONG -- timing only).
-            // The 4 attribute arrays are indexed by the Gaussian id `g`, which is
-            // effectively random across lanes: a 32-way divergent gather touching
-            // ~4 cache lines per lane. Substituting a sequential index makes those
-            // same loads coalesced while keeping the instruction count, the
-            // atomics (still indexed by the real g) and all the maths identical.
-            // The delta bounds what ANY locality fix can buy -- packed attribute
-            // layout, coarser binning with a shared batch, block-level reuse.
-            // mask, not modulo: AMD has no hardware integer divide, and a
-            // 141-instruction div sequence would swamp the effect being measured.
-            const int32_t gl = (int32_t)(idx & (int64_t)ls_probe_mask);
-#else
             const int32_t gl = g;
-#endif
-#if defined(GSPLAT_PROBE_CONST_ATTR)
-            // PHASE-2.4b ABLATION (results intentionally WRONG -- timing only).
-            // Same four loads, same instruction count, but every lane reads
-            // Gaussian 0: one cache line, guaranteed resident. Removes the
-            // gather's memory-level cost while keeping its issue cost.
-            // CAVEAT: with identical attributes the alpha test takes a
-            // different path for most pixels, so CONTROL FLOW CHANGES and the
-            // delta is an upper bound contaminated by a smaller workload.
-            // GSPLAT_PROBE_GATHER2 below is the control-flow-exact companion.
-            const int32_t gp = 0;
-#else
             const int32_t gp = gl;
-#endif
             const vec2 xy = means2d[gp];
             const float opac = opacities[gp];
             _xy_opacity_batch = {xy.x, xy.y, opac};
             _conic_batch = conics[gp];
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
-#if defined(GSPLAT_RGB_SHFL)
                 _rgb_batch[k] = colors[gp * CDIM + k];
-#else
-                s_rgbs[lane * CDIM + k] = colors[gp * CDIM + k];
-#endif
             }
-#if defined(GSPLAT_PROBE_GATHER2)
-            // PHASE-2.4a ABLATION (control-flow EXACT; results unchanged).
-            // Issue a SECOND, equally scattered gather of the same four
-            // attributes at a different Gaussian id, and fold it into a value
-            // the compiler cannot prove dead. Everything else -- the maths, the
-            // alpha test, the epilogue -- is bit-identical, so the delta is the
-            // MARGINAL cost of one attribute gather. If it is ~0 the gather's
-            // latency is already fully overlapped and 4C has no headroom.
-            {
-                // mask, not modulo: no hardware integer divide here, and a
-                // division sequence would swamp the effect being measured.
-                const int32_t g2 =
-                    (int32_t)(((uint32_t)gl * 2654435761u) & ls_probe_mask);
-                const vec2 xy2 = means2d[g2];
-                const vec3 cn2 = conics[g2];
-                const float op2 = opacities[g2];
-                float c2 = 0.f;
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) c2 += colors[g2 * CDIM + k];
-                const float sink = xy2.x + xy2.y + cn2.x + cn2.y + cn2.z + op2 + c2;
-                // never true for finite inputs, but not provably false
-                if (__float_as_int(sink) == 0x7f800001) {
-                    _xy_opacity_batch.z += sink;
-                }
-            }
-#endif
         }
         warp.sync();
-#endif // GSPLAT_BATCH_PREFETCH
 
-#if defined(GSPLAT_TPIPE)
-        // ---- 4A: software-pipelined Gaussian evaluation -------------------
-        //
-        // The ONLY loop-carried state in this loop is T[s] (one multiply per
-        // Gaussian per pixel) and buf_s[k] (one FMA). Everything else -- the
-        // shfl broadcast, delta, sigma, __expf, the alpha threshold test --
-        // depends only on Gaussian t and is completely independent between
-        // iterations. But the compiler does not unroll this loop: the baseline
-        // ISA contains exactly ONE v_exp_f32 and ONE v_rcp_f32 per pixel per
-        // iteration, and 139 of its 929 instructions are s_delay_alu, i.e. the
-        // scheduler stalling for want of independent work. Phase 1.2 puts two
-        // independent chains at 38% of achievable VALU throughput on this part
-        // and four at 67%.
-        //
-        // So: issue the broadcast and the whole alpha/sigma evaluation for
-        // Gaussian t+1 BEFORE doing Gaussian t's dependent transmittance,
-        // gradient and epilogue work. Two sigma->exp->alpha chains are then in
-        // flight at once -- four independent chains across the two pixels
-        // instead of two. Arithmetic and control flow are unchanged; only the
-        // issue order moves, so results stay bit-identical.
-        {
-            struct GEval {
-                vec3 conic, xy_opac;
-                float rgb[CDIM];
-                float alpha[2], vis[2];
-                bool valid[2];
-            };
-            // Returned by value (not written through a reference) so SROA can
-            // keep the whole thing in registers instead of scratch.
-            auto eval_g = [&](uint32_t tt) {
-                GEval e;
-                e.conic.x = GSPLAT_BCAST_F(_conic_batch.x, tt);
-                e.conic.y = GSPLAT_BCAST_F(_conic_batch.y, tt);
-                e.conic.z = GSPLAT_BCAST_F(_conic_batch.z, tt);
-                e.xy_opac.x = GSPLAT_BCAST_F(_xy_opacity_batch.x, tt);
-                e.xy_opac.y = GSPLAT_BCAST_F(_xy_opacity_batch.y, tt);
-                e.xy_opac.z = GSPLAT_BCAST_F(_xy_opacity_batch.z, tt);
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-#if defined(GSPLAT_RGB_SHFL)
-                    e.rgb[k] = GSPLAT_BCAST_F(_rgb_batch[k], tt);
-#else
-                    e.rgb[k] = 0.f; // unused: colours come from s_rgbs[tt*CDIM+k]
-#endif
-                }
-#pragma unroll
-                for (int s = 0; s < 2; ++s) {
-                    bool v = (batch_end - tt <= bin_final_arr[s]);
-                    float al = 0.f, vi = 0.f;
-                    if (v) {
-                        const float dx = e.xy_opac.x - px[s];
-                        const float dy = e.xy_opac.y - py[s];
-                        const float sigma =
-                            0.5f * (e.conic.x * dx * dx + e.conic.z * dy * dy) +
-                            e.conic.y * dx * dy;
-                        vi = __expf(-sigma);
-                        al = min(0.999f, e.xy_opac.z * vi);
-                        if (sigma < 0.f || al < ALPHA_THRESHOLD) {
-                            v = false;
-                        }
-                    }
-                    e.alpha[s] = al;
-                    e.vis[s] = vi;
-                    e.valid[s] = v;
-                }
-                return e;
-            };
-
-            const uint32_t t_begin = max(0, batch_end - warp_bin_final);
-            if (t_begin < current_batch_size) {
-                GEval cur = eval_g(t_begin);
-                GEval nxt;
-                for (uint32_t t = t_begin; t < current_batch_size; ++t) {
-                    // ---- INDEPENDENT: next Gaussian, issued first ----------
-                    // current_batch_size is wave-uniform, so this branch is
-                    // uniform and the shfls inside stay convergent.
-                    if (t + 1u < current_batch_size) {
-                        nxt = eval_g(t + 1u);
-                    }
-
-                    // ---- DEPENDENT: this Gaussian --------------------------
-                    const vec3 conic = cur.conic;
-                    const vec3 xy_opac = cur.xy_opac;
-#if defined(GSPLAT_RGB_SHFL)
-                    float rgb_t[CDIM];
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) rgb_t[k] = cur.rgb[k];
-#define GSPLAT_RGB_T(k) rgb_t[k]
-#else
-#define GSPLAT_RGB_T(k) s_rgbs[t * CDIM + (k)]
-#endif
-                    float v_rgb_local[CDIM] = {0.f};
-                    vec3 v_conic_local = {0.f, 0.f, 0.f};
-                    vec2 v_xy_local = {0.f, 0.f};
-                    vec2 v_xy_abs_local = {0.f, 0.f};
-                    float v_opacity_local = 0.f;
-                    bool any_valid = false;
-
-#pragma unroll
-                    for (int s = 0; s < 2; ++s) {
-                        const bool valid = cur.valid[s];
-                        if (valid) {
-                            const uint32_t p_s =
-                                lane + GSPLAT_WARP_SIZE * (uint32_t)s;
-                            const float alpha = cur.alpha[s];
-                            const float vis = cur.vis[s];
-                            const float opac_s = xy_opac.z;
-                            // recomputed, not carried: 2 v_sub is cheaper than
-                            // 4 more VGPRs of pipeline state
-                            const vec2 delta = {xy_opac.x - px[s],
-                                                xy_opac.y - py[s]};
-#if defined(GSPLAT_REG_PIXSTATE)
-                            const float *vrc_s = r_vrc[s];
-#define GSPLAT_TF_S r_tf[s]
-#define GSPLAT_VA_S r_va[s]
-#else
-                            const float *vrc_s = s_vrc + p_s * CDIM;
-#define GSPLAT_TF_S s_tf[p_s]
-#define GSPLAT_VA_S s_va[p_s]
-#endif
-#if defined(GSPLAT_REG_BUF)
-                            float *buf_s = r_buf[s];
-#else
-                            float *buf_s = s_buf + p_s * CDIM;
-#endif
-                            (void)p_s;
-                            const float ra = 1.0f / (1.0f - alpha);
-                            T[s] *= ra;
-                            const float fac = alpha * T[s];
-#pragma unroll
-                            for (uint32_t k = 0; k < CDIM; ++k) {
-                                v_rgb_local[k] += fac * vrc_s[k];
-                            }
-                            float v_alpha = 0.f;
-#pragma unroll
-                            for (uint32_t k = 0; k < CDIM; ++k) {
-                                v_alpha +=
-                                    (GSPLAT_RGB_T(k) * T[s] - buf_s[k] * ra) *
-                                    vrc_s[k];
-                            }
-                            v_alpha += GSPLAT_TF_S * ra * GSPLAT_VA_S;
-                            if (backgrounds != nullptr) {
-                                float accum = 0.f;
-#pragma unroll
-                                for (uint32_t k = 0; k < CDIM; ++k) {
-                                    accum += backgrounds[k] * vrc_s[k];
-                                }
-                                v_alpha += -GSPLAT_TF_S * ra * accum;
-                            }
-                            if (opac_s * vis <= 0.999f) {
-                                const float v_sigma = -opac_s * vis * v_alpha;
-                                v_conic_local.x +=
-                                    0.5f * v_sigma * delta.x * delta.x;
-                                v_conic_local.y += v_sigma * delta.x * delta.y;
-                                v_conic_local.z +=
-                                    0.5f * v_sigma * delta.y * delta.y;
-                                const float vxl =
-                                    v_sigma * (conic.x * delta.x +
-                                               conic.y * delta.y);
-                                const float vyl =
-                                    v_sigma * (conic.y * delta.x +
-                                               conic.z * delta.y);
-                                v_xy_local.x += vxl;
-                                v_xy_local.y += vyl;
-                                if constexpr (ABSGRAD) {
-                                    v_xy_abs_local.x += abs(vxl);
-                                    v_xy_abs_local.y += abs(vyl);
-                                }
-                                v_opacity_local += vis * v_alpha;
-                            }
-#pragma unroll
-                            for (uint32_t k = 0; k < CDIM; ++k) {
-                                buf_s[k] += GSPLAT_RGB_T(k) * fac;
-                            }
-                        }
-                        any_valid |= valid;
-                    }
-
-                    cur = nxt; // rotate the pipeline before the epilogue branch
-
-                    if (!warp.any(any_valid)) {
-                        continue;
-                    }
-                    rocprim_warpSum<CDIM, GSPLAT_WARP_SIZE>(v_rgb_local,
-                                                            sum_storage);
-                    rocprim_warpSum<GSPLAT_WARP_SIZE>(v_conic_local, sum_storage);
-                    rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_local, sum_storage);
-                    if constexpr (ABSGRAD)
-                        rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_abs_local,
-                                                          sum_storage);
-                    rocprim_warpSum<GSPLAT_WARP_SIZE>(v_opacity_local,
-                                                      sum_storage);
-
-                    const int32_t g = GSPLAT_BCAST_I(_id_batch, t);
-                    constexpr uint32_t NGRAD = CDIM + 6u + (ABSGRAD ? 2u : 0u);
-                    static_assert(NGRAD <= GSPLAT_WARP_SIZE,
-                                  "lane-scatter needs one lane per component");
-                    float *ls_ptr = nullptr;
-                    float ls_val = 0.f;
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) {
-                        if (lane == k) {
-                            ls_ptr = (float *)(v_colors) + CDIM * g + k;
-                            ls_val = v_rgb_local[k];
-                        }
-                    }
-                    if (lane == CDIM + 0u) { ls_ptr = (float *)(v_conics) + 3 * g + 0; ls_val = v_conic_local.x; }
-                    if (lane == CDIM + 1u) { ls_ptr = (float *)(v_conics) + 3 * g + 1; ls_val = v_conic_local.y; }
-                    if (lane == CDIM + 2u) { ls_ptr = (float *)(v_conics) + 3 * g + 2; ls_val = v_conic_local.z; }
-                    if (lane == CDIM + 3u) { ls_ptr = (float *)(v_means2d) + 2 * g + 0; ls_val = v_xy_local.x; }
-                    if (lane == CDIM + 4u) { ls_ptr = (float *)(v_means2d) + 2 * g + 1; ls_val = v_xy_local.y; }
-                    if (lane == CDIM + 5u) { ls_ptr = v_opacities + g;                  ls_val = v_opacity_local; }
-                    if constexpr (ABSGRAD) {
-                        if (lane == CDIM + 6u) { ls_ptr = (float *)(v_means2d_abs) + 2 * g + 0; ls_val = v_xy_abs_local.x; }
-                        if (lane == CDIM + 7u) { ls_ptr = (float *)(v_means2d_abs) + 2 * g + 1; ls_val = v_xy_abs_local.y; }
-                    }
-                    if (ls_ptr != nullptr) {
-                        atomicAdd(ls_ptr, ls_val);
-                    }
-                }
-            }
-        }
-#else
         for (uint32_t t = max(0, batch_end - warp_bin_final);
              t < current_batch_size; ++t) {
             // broadcast gaussian t (held by lane t) to every lane in the wave
             vec3 conic;
-            conic.x = GSPLAT_BCAST_F(_conic_batch.x, t);
-            conic.y = GSPLAT_BCAST_F(_conic_batch.y, t);
-            conic.z = GSPLAT_BCAST_F(_conic_batch.z, t);
+            conic.x = warp.shfl(_conic_batch.x, t);
+            conic.y = warp.shfl(_conic_batch.y, t);
+            conic.z = warp.shfl(_conic_batch.z, t);
             vec3 xy_opac;
-            xy_opac.x = GSPLAT_BCAST_F(_xy_opacity_batch.x, t);
-            xy_opac.y = GSPLAT_BCAST_F(_xy_opacity_batch.y, t);
-            xy_opac.z = GSPLAT_BCAST_F(_xy_opacity_batch.z, t);
-#if defined(GSPLAT_RGB_SHFL)
+            xy_opac.x = warp.shfl(_xy_opacity_batch.x, t);
+            xy_opac.y = warp.shfl(_xy_opacity_batch.y, t);
+            xy_opac.z = warp.shfl(_xy_opacity_batch.z, t);
             float rgb_t[CDIM];
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k)
-                rgb_t[k] = GSPLAT_BCAST_F(_rgb_batch[k], t);
-#define GSPLAT_RGB_T(k) rgb_t[k]
-#else
-#define GSPLAT_RGB_T(k) s_rgbs[t * CDIM + (k)]
-#endif
+                rgb_t[k] = warp.shfl(_rgb_batch[k], t);
 
             float v_rgb_local[CDIM] = {0.f};
             vec3 v_conic_local = {0.f, 0.f, 0.f};
@@ -1474,55 +987,13 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                         valid = false;
                     }
                 }
-#if defined(GSPLAT_PROBE_NOGRAD)
-                // PHASE-2.6 ABLATION (results intentionally WRONG -- timing only).
-                // CONTROL-FLOW EXACT: the alpha/sigma evaluation above and the
-                // `valid` predicate are untouched, so every wave visits exactly
-                // the same (tile, Gaussian, pixel) triples and the epilogue
-                // fires exactly as often. Only the gradient math is deleted --
-                // the CDIM loops, the per-pixel LDS reads (s_vrc/s_buf/s_tf/
-                // s_va), and the conic/mean/opacity chain. The accumulators are
-                // still written with a data-dependent value so the reduction
-                // and the atomics stay alive and identical in shape.
-                if (valid) {
-                    const float ra = 1.0f / (1.0f - alpha);
-                    T[s] *= ra;
-                    const float fac = alpha * T[s];
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) v_rgb_local[k] += fac;
-                    v_conic_local.x += fac;
-                    v_conic_local.y += fac;
-                    v_conic_local.z += fac;
-                    v_xy_local.x += fac;
-                    v_xy_local.y += fac;
-                    if constexpr (ABSGRAD) {
-                        v_xy_abs_local.x += fac;
-                        v_xy_abs_local.y += fac;
-                    }
-                    v_opacity_local += fac;
-                }
-#else
                 if (valid) {
                     const uint32_t p_s = lane + GSPLAT_WARP_SIZE * (uint32_t)s;
                     // Macros, not locals: binding s_tf[p_s]/s_va[p_s] to a
                     // named local would CSE the two reads and perturb baseline
                     // codegen, which must stay byte-identical with all flags off.
-#if defined(GSPLAT_REG_PIXSTATE)
                     const float *vrc_s = r_vrc[s];
-#define GSPLAT_TF_S r_tf[s]
-#define GSPLAT_VA_S r_va[s]
-#else
-                    const float *vrc_s = s_vrc + p_s * CDIM;
-#define GSPLAT_TF_S s_tf[p_s]
-#define GSPLAT_VA_S s_va[p_s]
-#endif
-#if defined(GSPLAT_BUF_DOT)
                     float *buf_s = nullptr; (void)buf_s;
-#elif defined(GSPLAT_REG_BUF)
-                    float *buf_s = r_buf[s];
-#else
-                    float *buf_s = s_buf + p_s * CDIM;
-#endif
                     (void)p_s;
                     float ra = 1.0f / (1.0f - alpha);
                     T[s] *= ra;
@@ -1532,33 +1003,21 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                         v_rgb_local[k] += fac * vrc_s[k];
                     }
                     float v_alpha = 0.f;
-#if defined(GSPLAT_BUF_DOT)
                     float R_dot = 0.f;
 #pragma unroll
                     for (uint32_t k = 0; k < CDIM; ++k) {
-                        R_dot += GSPLAT_RGB_T(k) * vrc_s[k];
+                        R_dot += rgb_t[k] * vrc_s[k];
                     }
                     v_alpha += R_dot * T[s] - r_sdot[s] * ra;
-#else
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) {
-                        v_alpha += (GSPLAT_RGB_T(k) * T[s] - buf_s[k] * ra) *
-                                   vrc_s[k];
-                    }
-#endif
-#if defined(GSPLAT_ALPHA_FOLD)
-                    v_alpha += r_tfva[s] * ra;
-#else
-                    v_alpha += GSPLAT_TF_S * ra * GSPLAT_VA_S;
+                    v_alpha += r_tf[s] * ra * r_va[s];
                     if (backgrounds != nullptr) {
                         float accum = 0.f;
 #pragma unroll
                         for (uint32_t k = 0; k < CDIM; ++k) {
                             accum += backgrounds[k] * vrc_s[k];
                         }
-                        v_alpha += -GSPLAT_TF_S * ra * accum;
+                        v_alpha += -r_tf[s] * ra * accum;
                     }
-#endif
                     if (opac_s * vis <= 0.999f) {
                         const float v_sigma = -opac_s * vis * v_alpha;
                         v_conic_local.x += 0.5f * v_sigma * delta.x * delta.x;
@@ -1576,71 +1035,16 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                         }
                         v_opacity_local += vis * v_alpha;
                     }
-#if defined(GSPLAT_BUF_DOT)
                     r_sdot[s] += R_dot * fac;
-#else
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) {
-                        buf_s[k] += GSPLAT_RGB_T(k) * fac;
-                    }
-#endif
                 }
-#endif // GSPLAT_PROBE_NOGRAD
                 any_valid |= valid;
             }
 
             // skip the (relatively expensive) reduction if no pixel is active
-#if defined(GSPLAT_DISTWAR_T)
-            // DISTWAR (arXiv:2401.05345) balancing threshold. The warp reduction
-            // is not free: it is ~9 all-reduces regardless of how many lanes
-            // actually contributed. Measured on this scene, 40% of contributing
-            // (tile, Gaussian) pairs have fewer than 8 active lanes and pay a
-            // full 32-lane reduction to combine ~3.5 values. Below the threshold
-            // we skip the reduction entirely and let each active lane issue its
-            // own atomics -- trading SM work for atomic-unit work, which the
-            // ceiling probes show is nearly free on this part.
-            const uint32_t ls_act = __popc((unsigned)warp.ballot(any_valid));
-            if (ls_act == 0u) {
-                continue;
-            }
-            if (ls_act < (uint32_t)(GSPLAT_DISTWAR_T)) {
-                int32_t g_d = GSPLAT_BCAST_I(_id_batch, t);
-                if (any_valid) {
-                    float *p_rgb = (float *)(v_colors) + CDIM * g_d;
-#pragma unroll
-                    for (uint32_t k = 0; k < CDIM; ++k) {
-                        atomicAdd(p_rgb + k, v_rgb_local[k]);
-                    }
-                    float *p_con = (float *)(v_conics) + 3 * g_d;
-                    atomicAdd(p_con, v_conic_local.x);
-                    atomicAdd(p_con + 1, v_conic_local.y);
-                    atomicAdd(p_con + 2, v_conic_local.z);
-                    float *p_xy = (float *)(v_means2d) + 2 * g_d;
-                    atomicAdd(p_xy, v_xy_local.x);
-                    atomicAdd(p_xy + 1, v_xy_local.y);
-                    if constexpr (ABSGRAD) {
-                        float *p_abs = (float *)(v_means2d_abs) + 2 * g_d;
-                        atomicAdd(p_abs, v_xy_abs_local.x);
-                        atomicAdd(p_abs + 1, v_xy_abs_local.y);
-                    }
-                    atomicAdd(v_opacities + g_d, v_opacity_local);
-                }
-                continue;
-            }
-#else
             if (!warp.any(any_valid)) {
                 continue;
             }
-#endif
 
-#if defined(GSPLAT_PROBE_NOREDUCE)
-            // PHASE-2 ABLATION (results intentionally WRONG -- timing only).
-            // CONTROL-FLOW EXACT: skip the 9 cross-lane all-reduces. Each lane
-            // keeps its own partial, so the epilogue still issues exactly the
-            // same atomic to exactly the same address; only the reduction work
-            // disappears. §3.5 of atomics_analysis.md estimates the reduction
-            // at ~30% of VALU -- this measures it directly.
-#else
             // single 32-lane rocprim (DPP) reduction across this wave's tile
             rocprim_warpSum<CDIM, GSPLAT_WARP_SIZE>(v_rgb_local, sum_storage);
             rocprim_warpSum<GSPLAT_WARP_SIZE>(v_conic_local, sum_storage);
@@ -1648,10 +1052,8 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             if constexpr (ABSGRAD)
                 rocprim_warpSum<GSPLAT_WARP_SIZE>(v_xy_abs_local, sum_storage);
             rocprim_warpSum<GSPLAT_WARP_SIZE>(v_opacity_local, sum_storage);
-#endif
 
-            int32_t g = GSPLAT_BCAST_I(_id_batch, t);
-#if defined(GSPLAT_LANE_SCATTER)
+            int32_t g = warp.shfl(_id_batch, t);
             // LANE-SCATTER epilogue.
             //
             // The default path below leaves all NGRAD reduced components in lane
@@ -1677,21 +1079,6 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             // all-reduce (dpp_permlane_warpSum32) already leaves them in every
             // lane; rocprim::warp_reduce defaults to UseAllReduce=false and
             // leaves them in lane 0 only, so broadcast in that case.
-#if !defined(GSPLAT_DPP_WARPSUM)
-#pragma unroll
-            for (uint32_t k = 0; k < CDIM; ++k)
-                v_rgb_local[k] = warp.shfl(v_rgb_local[k], 0);
-            v_conic_local.x = warp.shfl(v_conic_local.x, 0);
-            v_conic_local.y = warp.shfl(v_conic_local.y, 0);
-            v_conic_local.z = warp.shfl(v_conic_local.z, 0);
-            v_xy_local.x = warp.shfl(v_xy_local.x, 0);
-            v_xy_local.y = warp.shfl(v_xy_local.y, 0);
-            v_opacity_local = warp.shfl(v_opacity_local, 0);
-            if constexpr (ABSGRAD) {
-                v_xy_abs_local.x = warp.shfl(v_xy_abs_local.x, 0);
-                v_xy_abs_local.y = warp.shfl(v_xy_abs_local.y, 0);
-            }
-#endif
             float *ls_ptr = nullptr;
             float ls_val = 0.f;
             // Comparisons are against compile-time constants so each becomes a
@@ -1713,67 +1100,10 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                 if (lane == CDIM + 6u) { ls_ptr = (float *)(v_means2d_abs) + 2 * g + 0; ls_val = v_xy_abs_local.x; }
                 if (lane == CDIM + 7u) { ls_ptr = (float *)(v_means2d_abs) + 2 * g + 1; ls_val = v_xy_abs_local.y; }
             }
-#if defined(GSPLAT_PROBE_ATOMIC_PRIV)
-            // PHASE-2.3 ABLATION (results intentionally WRONG -- timing only).
-            // Same atomic instruction, same lane mask, same issue pattern, but
-            // retargeted to a slot private to this (tile, lane). No two
-            // workgroups ever touch the same address, so cross-block contention
-            // is eliminated; the gap to the unmodified build is contention
-            // alone. CAVEAT: it also collapses 4 destination arrays to 1, so
-            // some of any delta is reduced traffic, not reduced contention --
-            // read it together with GSPLAT_PROBE_NOEPI, not on its own.
             if (ls_ptr != nullptr) {
-                ls_ptr = v_opacities +
-                         min(tile_id * NGRAD + lane, (uint32_t)(N > 0 ? N - 1 : 0));
-            }
-#endif
-            if (ls_ptr != nullptr) {
-#if defined(GSPLAT_PROBE_STORE)
-                // CEILING PROBE (results intentionally WRONG -- timing only).
-                // Same addresses, same traffic, plain store instead of atomic:
-                // isolates the cost of the atomic RMW itself, and bounds what a
-                // scatter-to-unique-slots design could save.
-                *ls_ptr = ls_val;
-#elif defined(GSPLAT_PROBE_NOEPI)
-                // CEILING PROBE (results intentionally WRONG -- timing only).
-                // Never true at runtime, but not provably false to the compiler,
-                // so the reduction and address math stay alive while the memory
-                // operation disappears. Bounds the whole epilogue.
-                if (__float_as_int(ls_val) == 0x7f800001) {
-                    atomicAdd(ls_ptr, ls_val);
-                }
-#else
                 atomicAdd(ls_ptr, ls_val);
-#endif
             }
-#else
-            if (lane == 0) { // one atomicAdd set per gaussian per tile
-                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-                    atomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
-                }
-
-                float *v_conic_ptr = (float *)(v_conics) + 3 * g;
-                atomicAdd(v_conic_ptr, v_conic_local.x);
-                atomicAdd(v_conic_ptr + 1, v_conic_local.y);
-                atomicAdd(v_conic_ptr + 2, v_conic_local.z);
-
-                float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
-                atomicAdd(v_xy_ptr, v_xy_local.x);
-                atomicAdd(v_xy_ptr + 1, v_xy_local.y);
-
-                if constexpr (ABSGRAD) {
-                    float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
-                    atomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
-                    atomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
-                }
-
-                atomicAdd(v_opacities + g, v_opacity_local);
-            }
-#endif
         }
-#endif // GSPLAT_TPIPE
     }
 }
 
@@ -2799,30 +2129,15 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
       if constexpr (CDIM <= GSPLAT_BS32_MULTITILE_MAXCDIM) {
       // multi-tile path: a 256-thread block (MT_WARPS == 8 wave32 waves) where
       // each wave independently rasterizes ONE 8x8 tile (bs32_1wave body). The
-      // per-wave LDS (s_rgbs|s_vrc|s_buf) is replicated MT_WARPS times; the grid
-      // packs MT_WARPS tiles per block. Gated to small CDIM so 8x LDS fits 64KB.
+      // The grid packs MT_WARPS tiles per block. Gated to small CDIM to bound
+      // the per-wave register footprint.
       constexpr uint32_t MT_WARPS = 256u / GSPLAT_WARP_SIZE; // 8
       max_batch_size = GSPLAT_WARP_SIZE; // 32, each wave loads its own batch
-      // MUST track the per_warp layout inside the kernel exactly -- the same
-      // GSPLAT_REG_* / GSPLAT_RGB_SHFL flags remove the same arrays there.
-      shmem_size = (int64_t)MT_WARPS *
-        (
-#if !defined(GSPLAT_RGB_SHFL)
-         (int64_t)GSPLAT_WARP_SIZE * CDIM * sizeof(float)         // s_rgbs
-#else
-         (int64_t)0
-#endif
-#if !defined(GSPLAT_REG_PIXSTATE)
-         + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)   // s_vrc
-#endif
-#if !defined(GSPLAT_REG_BUF) && !defined(GSPLAT_BUF_DOT)
-         + (int64_t)2 * GSPLAT_WARP_SIZE * CDIM * sizeof(float)   // s_buf
-#endif
-#if !defined(GSPLAT_REG_PIXSTATE)
-         + (int64_t)2 * GSPLAT_WARP_SIZE * sizeof(float)          // s_tf  (H3)
-         + (int64_t)2 * GSPLAT_WARP_SIZE * sizeof(float)          // s_va  (H3)
-#endif
-        );
+      // Zero dynamic LDS: every per-pixel array this kernel used to stage in
+      // shared memory now lives in registers, and Gaussian colours are
+      // broadcast with warp.shfl. The only LDS left is the static rocprim
+      // scratch declared inside the kernel.
+      shmem_size = 0;
       threads = dim3{256, 1, 1};
       grid = dim3{I, (tile_height * tile_width + MT_WARPS - 1) / MT_WARPS, 1};
       } else

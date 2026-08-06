@@ -236,18 +236,12 @@ def get_extensions():
         # SAVE_TEMPS=1 and look for *-hip-amdgcn-amd-amdhsa-<arch>.s.
         if os.getenv("SAVE_TEMPS", "0") == "1":
             hipcc_flags += ["--save-temps=obj"]
-        # Opt-in (wave32 only): replace the LDS-unit cross-lane reduction
-        # (ds_swizzle/ds_bpermute emitted by rocprim::warp_reduce on gfx1250)
-        # with a DPP-intra16 + v_readlane cross-16 all-reduce. Build with
-        # DPP_WARPSUM=1 to A/B against the rocprim path.
-        if os.getenv("DPP_WARPSUM", "0") == "1":
-            hipcc_flags += ["-DGSPLAT_DPP_WARPSUM=1"]
         # Opt-in (wave32 only): multi-tile backward rasterizer. A 256-thread
         # block (8 wave32 waves) rasterizes 8 separate 8x8 tiles (one per wave)
         # to raise wave occupancy (deep, tile16-like) while keeping the 8x8 tile
-        # granularity of the bs32 path. Gated to small CDIM in-source so the 8x
-        # per-wave LDS fits 64KB. Build with BS32_MULTITILE=1. Must be defined
-        # for BOTH host (launcher shmem/grid sizing) and device compilation.
+        # granularity of the bs32 path. Gated to small CDIM in-source to bound
+        # the per-wave register footprint. Build with BS32_MULTITILE=1. Must be
+        # defined for BOTH host (launcher grid sizing) and device compilation.
         if os.getenv("BS32_MULTITILE", "0") == "1":
             extra_compile_args["cxx"] += ["-DGSPLAT_BS32_MULTITILE=1"]
             hipcc_flags += ["-DGSPLAT_BS32_MULTITILE=1"]

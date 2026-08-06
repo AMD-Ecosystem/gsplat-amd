@@ -260,7 +260,7 @@ inline __device__ void manual_warpSum(float val[N]) {
     }  
 }
 
-#if defined(USE_ROCM) && defined(GSPLAT_DPP_WARPSUM)
+#if defined(USE_ROCM)
 // ---------------------------------------------------------------------------
 // Pure-VALU 32-lane all-reduce (sum) for gfx1250 / wave32.
 //
@@ -301,7 +301,7 @@ template<int LOGICAL_WARP_SIZE = GSPLAT_WARP_SIZE>
 __device__ inline void rocprim_warpSum_scalar(float& val, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
             warp_storage_base)
 {
-#if defined(USE_ROCM) && defined(GSPLAT_DPP_WARPSUM)
+#if defined(USE_ROCM)
     if constexpr (LOGICAL_WARP_SIZE == 32) {
         // VALU-only 32-lane all-reduce; ignores the LDS scratch entirely.
         (void)warp_storage_base;
