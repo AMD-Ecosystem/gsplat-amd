@@ -223,6 +223,14 @@ def get_extensions():
         # dominated by gradient atomicAdds; on wave32 (gfx1250) the atomic count
         # is already doubled vs wave64, so fast HW atomics matter even more.
         hipcc_flags += ["-munsafe-fp-atomics"]
+        # Match the CUDA path, which has always built with nvcc --use_fast_math
+        # (see the nvcc_flags below). The HIP port never carried that across, so
+        # a plain `1.0f / x` compiles to the ~12-instruction IEEE division
+        # sequence (v_div_scale/v_div_fmas/v_div_fixup) instead of a single
+        # v_rcp_f32. In the 3DGS backward that sequence sits on the critical
+        # path of every gaussian, twice per lane. Set FAST_MATH=0 to A/B it.
+        if os.getenv("FAST_MATH", "1") != "0":
+            hipcc_flags += ["-ffast-math"]
         # Opt-in: print per-kernel VGPR/SGPR/spill/LDS/occupancy at compile time.
         # Build with KERNEL_RESOURCE_USAGE=1 and read the remarks in the build log.
         if os.getenv("KERNEL_RESOURCE_USAGE", "0") == "1":
@@ -245,6 +253,12 @@ def get_extensions():
         if os.getenv("BS32_MULTITILE", "0") == "1":
             extra_compile_args["cxx"] += ["-DGSPLAT_BS32_MULTITILE=1"]
             hipcc_flags += ["-DGSPLAT_BS32_MULTITILE=1"]
+        # Opt-in: split the multi-tile per-pixel body into a gaussian-test
+        # phase and a gradient phase, so both of a lane's two pixels are tested
+        # in one EXEC region and their __expf chains can interleave. Device
+        # only. Build with BS32_PHASE_SPLIT=1.
+        if os.getenv("BS32_PHASE_SPLIT", "0") == "1":
+            hipcc_flags += ["-DGSPLAT_BS32_PHASE_SPLIT=1"]
         # Generic extra defines, e.g. GSPLAT_EXTRA_DEFINES="GSPLAT_ATOMIC_CEILING GSPLAT_OPT2"
         for _d in os.getenv("GSPLAT_EXTRA_DEFINES", "").split():
             extra_compile_args["cxx"] += ["-D" + _d]

@@ -41,6 +41,15 @@ namespace cg = cooperative_groups;
 #define GSPLAT_BS32_MULTITILE_MAXCDIM 8
 #endif
 
+// Split the multi-tile per-pixel body into a gaussian-test phase and a
+// gradient phase (opt-in, off by default). Both of a lane's two pixels are
+// tested in one EXEC region so their __expf chains can interleave, instead of
+// sitting behind one `if (valid)` each. Costs ~6 extra live values (the
+// alpha/vis/delta/valid arrays) across the phase boundary.
+#ifndef GSPLAT_BS32_PHASE_SPLIT
+#define GSPLAT_BS32_PHASE_SPLIT 0
+#endif
+
 //compiler issue with mov_dpp intrinsic seen in Rocm 6.4.1, so mov_dpp intrinsic is temporarily commented out and replaced with rocprim which also uses dpp when in single wave
 // The DPP / "bs64" fast paths below assume a 64-lane wavefront; only compile
 // them for wave64 builds (gfx1250 etc. are wave32).
@@ -959,35 +968,90 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             for (uint32_t k = 0; k < CDIM; ++k)
                 rgb_t[k] = warp.shfl(_rgb_batch[k], t);
 
-            float v_rgb_local[CDIM] = {0.f};
-            vec3 v_conic_local = {0.f, 0.f, 0.f};
-            vec2 v_xy_local = {0.f, 0.f};
-            vec2 v_xy_abs_local = {0.f, 0.f};
-            float v_opacity_local = 0.f;
+            bool valid_s[2];
+            float alpha_s[2];
+            float vis_s[2];
+            vec2 delta_s[2];
             bool any_valid = false;
 
+#if GSPLAT_BS32_PHASE_SPLIT
+            // Phase 1: evaluate both of this lane's pixels in one basic block.
+            // The gaussian test is pure arithmetic on values that are always
+            // finite (px/py and the clamped loads are initialized for outside
+            // pixels too), so running it for lanes that turn out invalid is
+            // safe and costs only VALU.
+            //
+            // The point is the two __expf chains. Guarding each one with its
+            // own `if` writes EXEC between them, which forces the scheduler to
+            // keep the s=0 and s=1 transcendentals in separate regions and
+            // serializes two dependency chains that have no data dependence on
+            // each other. In one region they interleave.
+#pragma unroll
+            for (int s = 0; s < 2; ++s) {
+                delta_s[s] = {xy_opac.x - px[s], xy_opac.y - py[s]};
+                float sigma =
+                    0.5f * (conic.x * delta_s[s].x * delta_s[s].x +
+                            conic.z * delta_s[s].y * delta_s[s].y) +
+                    conic.y * delta_s[s].x * delta_s[s].y;
+                vis_s[s] = __expf(-sigma);
+                alpha_s[s] = min(0.999f, xy_opac.z * vis_s[s]);
+                // Bitwise & on purpose: && short-circuits, and each short
+                // circuit is another EXEC write in the middle of phase 1.
+                // H2: outside pixels have bin_final_arr[s] == -1, so the first
+                // term is false for them (batch_end - t >= 0).
+                valid_s[s] = (batch_end - t <= bin_final_arr[s]) &
+                             !(sigma < 0.f) & !(alpha_s[s] < ALPHA_THRESHOLD);
+                any_valid |= valid_s[s];
+            }
+
+            // Nothing in this wave touches gaussian t: skip the gradient
+            // bodies and the (relatively expensive) reduction alike.
+            if (!warp.any(any_valid)) {
+                continue;
+            }
+#else
 #pragma unroll
             for (int s = 0; s < 2; ++s) {
                 // H2: inside && (batch_end - t <= bin_final). Outside pixels have
                 // bin_final_arr[s] == -1, so this is false for them (batch_end-t>=0).
                 bool valid = (batch_end - t <= bin_final_arr[s]);
-                float alpha;
-                float opac_s;
-                float vis;
-                vec2 delta;
+                float alpha = 0.f;
+                float vis = 0.f;
+                vec2 delta = {0.f, 0.f};
                 if (valid) {
-                    opac_s = xy_opac.z;
                     delta = {xy_opac.x - px[s], xy_opac.y - py[s]};
                     float sigma = 0.5f * (conic.x * delta.x * delta.x +
                                           conic.z * delta.y * delta.y) +
                                   conic.y * delta.x * delta.y;
                     vis = __expf(-sigma);
-                    alpha = min(0.999f, opac_s * vis);
+                    alpha = min(0.999f, xy_opac.z * vis);
                     if (sigma < 0.f || alpha < ALPHA_THRESHOLD) {
                         valid = false;
                     }
                 }
-                if (valid) {
+                valid_s[s] = valid;
+                alpha_s[s] = alpha;
+                vis_s[s] = vis;
+                delta_s[s] = delta;
+                any_valid |= valid;
+            }
+#endif
+
+            float v_rgb_local[CDIM] = {0.f};
+            vec3 v_conic_local = {0.f, 0.f, 0.f};
+            vec2 v_xy_local = {0.f, 0.f};
+            vec2 v_xy_abs_local = {0.f, 0.f};
+            float v_opacity_local = 0.f;
+
+            // Phase 2: the gradient bodies. These read and write per-pixel
+            // state (T[s], r_sdot[s]) so they keep one EXEC region each.
+#pragma unroll
+            for (int s = 0; s < 2; ++s) {
+                if (valid_s[s]) {
+                    const float alpha = alpha_s[s];
+                    const float vis = vis_s[s];
+                    const vec2 delta = delta_s[s];
+                    const float opac_s = xy_opac.z;
                     const uint32_t p_s = lane + GSPLAT_WARP_SIZE * (uint32_t)s;
                     // Macros, not locals: binding s_tf[p_s]/s_va[p_s] to a
                     // named local would CSE the two reads and perturb baseline
@@ -1037,13 +1101,16 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
                     }
                     r_sdot[s] += R_dot * fac;
                 }
-                any_valid |= valid;
             }
 
+#if !GSPLAT_BS32_PHASE_SPLIT
             // skip the (relatively expensive) reduction if no pixel is active
             if (!warp.any(any_valid)) {
                 continue;
             }
+#else
+            (void)any_valid;
+#endif
 
             // single 32-lane rocprim (DPP) reduction across this wave's tile
             rocprim_warpSum<CDIM, GSPLAT_WARP_SIZE>(v_rgb_local, sum_storage);
