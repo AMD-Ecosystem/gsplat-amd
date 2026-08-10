@@ -422,8 +422,7 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     const bool *__restrict__ masks,           // [..., tile_height, tile_width]
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,   // tile width in pixels
-    const uint32_t tile_size_h, // tile height in pixels
+    const uint32_t tile_size, // tile extent in pixels (tiles are square)
     const uint32_t tile_width,
     const uint32_t tile_height,
     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
@@ -536,7 +535,7 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
         uint32_t p = lane + 32u * (uint32_t)s; // 0..63 within the tile
         uint32_t row = p / tile_size;
         uint32_t col = p % tile_size;
-        uint32_t i = trow * tile_size_h + row;
+        uint32_t i = trow * tile_size + row;
         uint32_t j = tcol * tile_size + col;
         px[s] = (float)j + 0.5f;
         py[s] = (float)i + 0.5f;
@@ -831,7 +830,7 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     uint32_t image_id = block.group_index().x;
     uint32_t tile_id =
         block.group_index().y * tile_width + block.group_index().z;
-    uint32_t i = block.group_index().y * tile_size_h + block.thread_index().y;
+    uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
     uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
 
     tile_offsets += image_id * tile_height * tile_width;
