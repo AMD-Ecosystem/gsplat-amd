@@ -18,11 +18,24 @@ import subprocess
 
 def get_rocm_arch():
     """
-    Runs rocminfo and extracts the GPU architecture (gfx code).
-    
+    Resolves the GPU architecture (gfx code) to build for.
+
+    Checks the PYTORCH_ROCM_ARCH environment variable first, since
+    `docker build` (and other build-only contexts) has no GPU device access,
+    so rocminfo always fails there and this would otherwise silently fall
+    back to the gfx942 default regardless of the actual build target. Only
+    falls back to querying rocminfo when PYTORCH_ROCM_ARCH is unset.
+
     Returns:
         str: The gfx code (e.g., 'gfx942', 'gfx90a'), or 'gfx942' as fallback.
     """
+    env_arch = os.environ.get("PYTORCH_ROCM_ARCH", "").strip()
+    if env_arch:
+        # PYTORCH_ROCM_ARCH may list multiple archs (comma/semicolon separated);
+        # take the first one since this function returns a single gfx code.
+        gfx_code = re.split(r"[,;]", env_arch)[0].strip()
+        print(f"Using PYTORCH_ROCM_ARCH from environment: {gfx_code}")
+        return gfx_code
     try:
         # Run rocminfo command
         result = subprocess.run(
