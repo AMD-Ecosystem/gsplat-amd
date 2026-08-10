@@ -244,21 +244,6 @@ def get_extensions():
         # SAVE_TEMPS=1 and look for *-hip-amdgcn-amd-amdhsa-<arch>.s.
         if os.getenv("SAVE_TEMPS", "0") == "1":
             hipcc_flags += ["--save-temps=obj"]
-        # Opt-in (wave32 only): multi-tile backward rasterizer. A 256-thread
-        # block (8 wave32 waves) rasterizes 8 separate 8x8 tiles (one per wave)
-        # to raise wave occupancy (deep, tile16-like) while keeping the 8x8 tile
-        # granularity of the bs32 path. Gated to small CDIM in-source to bound
-        # the per-wave register footprint. Build with BS32_MULTITILE=1. Must be
-        # defined for BOTH host (launcher grid sizing) and device compilation.
-        if os.getenv("BS32_MULTITILE", "0") == "1":
-            extra_compile_args["cxx"] += ["-DGSPLAT_BS32_MULTITILE=1"]
-            hipcc_flags += ["-DGSPLAT_BS32_MULTITILE=1"]
-        # Opt-in: split the multi-tile per-pixel body into a gaussian-test
-        # phase and a gradient phase, so both of a lane's two pixels are tested
-        # in one EXEC region and their __expf chains can interleave. Device
-        # only. Build with BS32_PHASE_SPLIT=1.
-        if os.getenv("BS32_PHASE_SPLIT", "0") == "1":
-            hipcc_flags += ["-DGSPLAT_BS32_PHASE_SPLIT=1"]
         # Generic extra defines, e.g. GSPLAT_EXTRA_DEFINES="GSPLAT_ATOMIC_CEILING GSPLAT_OPT2"
         for _d in os.getenv("GSPLAT_EXTRA_DEFINES", "").split():
             extra_compile_args["cxx"] += ["-D" + _d]
