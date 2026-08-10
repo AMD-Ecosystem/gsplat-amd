@@ -32,7 +32,6 @@ __global__ void intersect_tile_kernel(
     const scalar_t *__restrict__ depths,             // [..., N] or [nnz]
     const int64_t *__restrict__ cum_tiles_per_gauss, // [..., N] or [nnz]
     const uint32_t tile_size,   // tile width in pixels
-    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const uint32_t tile_n_bits,
@@ -60,9 +59,9 @@ __global__ void intersect_tile_kernel(
     vec2 mean2d = glm::make_vec2(means2d + 2 * idx);
 
     float tile_radius_x = radius_x / static_cast<float>(tile_size);
-    float tile_radius_y = radius_y / static_cast<float>(tile_size_h);
+    float tile_radius_y = radius_y / static_cast<float>(tile_size);
     float tile_x = mean2d.x / static_cast<float>(tile_size);
-    float tile_y = mean2d.y / static_cast<float>(tile_size_h);
+    float tile_y = mean2d.y / static_cast<float>(tile_size);
 
     // tile_min is inclusive, tile_max is exclusive
     uint2 tile_min, tile_max;
@@ -118,7 +117,6 @@ void launch_intersect_tile_kernel(
     const at::optional<at::Tensor> gaussian_ids, // [nnz]
     const uint32_t I,
     const uint32_t tile_size,   // tile width in pixels
-    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const at::optional<at::Tensor> cum_tiles_per_gauss, // [..., N] or [nnz]
@@ -185,7 +183,6 @@ void launch_intersect_tile_kernel(
                         ? cum_tiles_per_gauss.value().data_ptr<int64_t>()
                         : nullptr,
                     tile_size,
-                    tile_size_h,
                     tile_width,
                     tile_height,
                     tile_n_bits,

@@ -119,7 +119,6 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,   // tile width in pixels
-    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
@@ -145,7 +144,7 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
     uint32_t image_id = block.group_index().x;
     uint32_t tile_id =
         block.group_index().y * tile_width + block.group_index().z;
-    uint32_t i = block.group_index().y * tile_size_h + block.thread_index().y;
+    uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
     uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
 
     tile_offsets += image_id * tile_height * tile_width;
@@ -807,7 +806,6 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,   // tile width in pixels
-    const uint32_t tile_size_h, // tile height in pixels
     const uint32_t tile_width,
     const uint32_t tile_height,
     const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
@@ -1146,7 +1144,6 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t image_width,
     const uint32_t image_height,
     const uint32_t tile_size,   // tile width in pixels
-    const uint32_t tile_size_h, // tile height in pixels
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
@@ -1173,13 +1170,13 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
 
     // Each block covers a tile on the image. In total there are
     // I * tile_height * tile_width blocks.
-    dim3 threads = {tile_size, tile_size_h, 1};
+    dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {I, tile_height, tile_width};
 
 #if USE_ROCM
     // Optimization for ROCm: Use smaller batch size to reduce shared memory usage
 
-    const uint32_t block_size = tile_size * tile_size_h;
+    const uint32_t block_size = tile_size * tile_size;
     uint32_t max_batch_size;
     int64_t shmem_size;
 #if GSPLAT_USE_WAVE64
@@ -1303,7 +1300,6 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
             image_width,
             image_height,
             tile_size,
-            tile_size_h,
             tile_width,
             tile_height,
             tile_offsets.data_ptr<int64_t>(),
@@ -1339,7 +1335,6 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         uint32_t image_width,                                                  \
         uint32_t image_height,                                                 \
         uint32_t tile_size,                                                    \
-        uint32_t tile_size_h,                                                  \
         const at::Tensor tile_offsets,                                         \
         const at::Tensor flatten_ids,                                          \
         const at::Tensor render_alphas,                                        \
