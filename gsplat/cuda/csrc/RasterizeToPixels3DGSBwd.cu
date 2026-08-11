@@ -17,11 +17,13 @@ namespace gsplat {
 namespace cg = cooperative_groups;
 
 
-// The wave32 multi-tile backward kernel is gated to small CDIM so its 8x
-// per-warp LDS slabs fit in 64KB; larger CDIM falls back to the generic
-// multi-warp kernel.
+// The wave32 multi-tile backward kernel is gated on CDIM by register pressure,
+// not LDS (it uses no dynamic shared memory). VGPRs run at ~69 + 5*CDIM, which
+// costs occupancy on gfx1250: CDIM 3 -> 10 waves/SIMD, 8 -> 9, 16 -> 6. The
+// hard ceiling is 24, where the lane-scatter static_assert(NGRAD <= 32) fails.
+// Larger CDIM falls back to the generic multi-warp kernel.
 #ifndef GSPLAT_BS32_MULTITILE_MAXCDIM
-#define GSPLAT_BS32_MULTITILE_MAXCDIM 8
+#define GSPLAT_BS32_MULTITILE_MAXCDIM 16
 #endif
 
 //compiler issue with mov_dpp intrinsic seen in Rocm 6.4.1, so mov_dpp intrinsic is temporarily commented out and replaced with rocprim which also uses dpp when in single wave
@@ -736,11 +738,13 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
             int32_t g = warp.shfl(_id_batch, t);
             // LANE-SCATTER epilogue.
             //
-            // The default path below leaves all NGRAD reduced components in lane
-            // 0, which then issues NGRAD *serialized* atomicAdds -- the wave
-            // stalls on each one's issue slot in turn. Here we instead give each
-            // of lanes [0, NGRAD) one component and one destination address, so
-            // the wave issues a SINGLE global_atomic_add_f32 with NGRAD lanes
+            // The conventional epilogue (still used by the generic kernel below)
+            // leaves all NGRAD reduced components in lane 0, which then issues
+            // NGRAD *serialized* atomicAdds -- the wave stalls on each one's
+            // issue slot in turn. The win grows with CDIM: NGRAD is 9 at CDIM=3
+            // but 22 at CDIM=16. Here we instead give each of lanes [0, NGRAD)
+            // one component and one destination address, so the wave issues a
+            // SINGLE global_atomic_add_f32 with NGRAD lanes
             // active. Same number of atomic values, same arithmetic (bitwise
             // identical: each component is still one f32 atomic add to the same
             // address), but the issue is parallel across lanes instead of serial.
@@ -1192,16 +1196,17 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
 #else
     // wave32 multi-tile register+shfl path: a 256-thread block (MT_WARPS == 8
     // wave32 waves) where each wave independently rasterizes ONE 8x8 tile with
-    // 2 pixels per lane, and the grid packs MT_WARPS tiles per block. Gated to
-    // small CDIM to bound the per-wave register footprint; larger CDIM and every
-    // other tile shape use the generic multi-warp config below.
+    // 2 pixels per lane, and the grid packs MT_WARPS tiles per block. Gated on
+    // CDIM by register pressure (see GSPLAT_BS32_MULTITILE_MAXCDIM); larger CDIM
+    // and every other tile shape use the generic multi-warp config below.
     if (block_size == 64 && CDIM <= GSPLAT_BS32_MULTITILE_MAXCDIM) {
       constexpr uint32_t MT_WARPS = 256u / GSPLAT_WARP_SIZE; // 8
       max_batch_size = GSPLAT_WARP_SIZE; // 32, each wave loads its own batch
       // Zero dynamic LDS: every per-pixel array this kernel used to stage in
       // shared memory now lives in registers, and Gaussian colours are
       // broadcast with warp.shfl. The only LDS left is the static rocprim
-      // scratch declared inside the kernel.
+      // scratch, which is empty on wave32 since DPP needs no storage -- builds
+      // report 0 bytes/block for every instantiation.
       shmem_size = 0;
       threads = dim3{256, 1, 1};
       grid = dim3{I, (tile_height * tile_width + MT_WARPS - 1) / MT_WARPS, 1};
