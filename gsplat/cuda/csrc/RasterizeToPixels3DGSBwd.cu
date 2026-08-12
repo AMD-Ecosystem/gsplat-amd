@@ -26,6 +26,18 @@ namespace cg = cooperative_groups;
 #define GSPLAT_BS32_MULTITILE_MAXCDIM 16
 #endif
 
+// Threads per multi-tile workgroup: 128, i.e. 4 wave32 waves each rasterizing
+// one 8x8 tile. Measured against 8-wave (256-thread) groups: neutral at CDIM=3,
+// 2.6% faster at CDIM=16, 4.8% faster at CDIM=8. CDIM=8 gains most because
+// resident waves per CU must be a whole multiple of the group size, and its 36
+// waves/CU (9 waves/SIMD of register budget) round down to 32 under 8-wave
+// groups but divide evenly under 4-wave ones. Register allocation is identical
+// either way, so the win is purely packing. Two bounds on this number: keep it a
+// multiple of 4 waves so they spread evenly over the four SIMD32s of a gfx1250
+// WGP, and do not go below 4, or the per-CU workgroup slot limit starts binding
+// before the register limit does.
+#define GSPLAT_BS32_MULTITILE_THREADS 128
+
 //compiler issue with mov_dpp intrinsic seen in Rocm 6.4.1, so mov_dpp intrinsic is temporarily commented out and replaced with rocprim which also uses dpp when in single wave
 // The DPP / "bs64" fast paths below assume a 64-lane wavefront; only compile
 // them for wave64 builds (gfx1250 etc. are wave32).
@@ -393,14 +405,15 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
 #if USE_ROCM && !GSPLAT_USE_WAVE64
 
 // ---------------------------------------------------------------------------
-// MULTI-TILE: a 256-thread block == 8 wave32 waves, where EACH wave
-// independently rasterizes a DIFFERENT 8x8 tile with a register+shfl geometry:
-// 2 px/lane, per-wave rocprim (DPP) reduction, one atomicAdd set per Gaussian
-// per tile. The 8 tiles handled by a block are (blockIdx.y * MT_WARPS +
-// warp_id). Because the waves own disjoint tiles, there is NO cross-wave
-// coupling: no block.sync(), no shared batch, and divergent per-wave loop trip
-// counts / early returns are all safe. The point is to supply 8 resident waves
-// per workgroup (deep occupancy, like tile16) while keeping the 8x8 tile
+// MULTI-TILE: a GSPLAT_BS32_MULTITILE_THREADS-thread block == MT_WARPS wave32
+// waves, where EACH wave independently rasterizes a DIFFERENT 8x8 tile with a
+// register+shfl geometry: 2 px/lane, per-wave rocprim (DPP) reduction, one
+// atomicAdd set per Gaussian per tile. The tiles handled by a block are
+// (blockIdx.y * MT_WARPS + warp_id). Because the waves own disjoint tiles,
+// there is NO cross-wave coupling: no block.sync(), no shared batch, and
+// divergent per-wave loop trip counts / early returns are all safe. The point
+// is to pack enough resident waves per workgroup to reach the register-limited
+// occupancy without running out of workgroup slots, while keeping the 8x8 tile
 // granularity of bs32. The per-wave rocprim scratch is replicated MT_WARPS
 // times and indexed by warp_id.
 //
@@ -409,8 +422,8 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
 // instantiates ABSGRAD=false, so the abs accumulator, its warp reduction and its
 // atomics are compiled out entirely (no dead registers / VALU / atomics).
 template <uint32_t CDIM, typename scalar_t, bool ABSGRAD>
-__launch_bounds__(256)
-__global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
+__launch_bounds__(GSPLAT_BS32_MULTITILE_THREADS)
+__global__ void rasterize_bs32_multitile_to_pixels_3dgs_bwd_kernel(
     const uint32_t I,
     const uint32_t N,
     const uint32_t n_isects,
@@ -447,7 +460,8 @@ __global__ void rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel(
     const uint32_t max_batch_size
 ) {
     auto block = cg::this_thread_block();
-    constexpr uint32_t MT_WARPS = 256u / GSPLAT_WARP_SIZE; // tiles per block (8)
+    constexpr uint32_t MT_WARPS =
+        GSPLAT_BS32_MULTITILE_THREADS / GSPLAT_WARP_SIZE; // tiles per block
 
     cg::thread_block_tile<GSPLAT_WARP_SIZE> warp =
         cg::tiled_partition<GSPLAT_WARP_SIZE>(block);
@@ -1194,13 +1208,15 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         (sizeof(float) * CDIM);
     } else
 #else
-    // wave32 multi-tile register+shfl path: a 256-thread block (MT_WARPS == 8
-    // wave32 waves) where each wave independently rasterizes ONE 8x8 tile with
-    // 2 pixels per lane, and the grid packs MT_WARPS tiles per block. Gated on
-    // CDIM by register pressure (see GSPLAT_BS32_MULTITILE_MAXCDIM); larger CDIM
-    // and every other tile shape use the generic multi-warp config below.
+    // wave32 multi-tile register+shfl path: a GSPLAT_BS32_MULTITILE_THREADS
+    // block (MT_WARPS wave32 waves) where each wave independently rasterizes
+    // ONE 8x8 tile with 2 pixels per lane, and the grid packs MT_WARPS tiles
+    // per block. Gated on CDIM by register pressure (see
+    // GSPLAT_BS32_MULTITILE_MAXCDIM); larger CDIM and every other tile shape
+    // use the generic multi-warp config below.
     if (block_size == 64 && CDIM <= GSPLAT_BS32_MULTITILE_MAXCDIM) {
-      constexpr uint32_t MT_WARPS = 256u / GSPLAT_WARP_SIZE; // 8
+      constexpr uint32_t MT_WARPS =
+          GSPLAT_BS32_MULTITILE_THREADS / GSPLAT_WARP_SIZE;
       max_batch_size = GSPLAT_WARP_SIZE; // 32, each wave loads its own batch
       // Zero dynamic LDS: every per-pixel array this kernel used to stage in
       // shared memory now lives in registers, and Gaussian colours are
@@ -1208,7 +1224,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
       // scratch, which is empty on wave32 since DPP needs no storage -- builds
       // report 0 bytes/block for every instantiation.
       shmem_size = 0;
-      threads = dim3{256, 1, 1};
+      threads = dim3{GSPLAT_BS32_MULTITILE_THREADS, 1, 1};
       grid = dim3{I, (tile_height * tile_width + MT_WARPS - 1) / MT_WARPS, 1};
     } else
 #endif
@@ -1270,8 +1286,8 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
             // H8: pick the ABSGRAD instantiation so the abs path is compiled
             // out when the caller does not request abs gradients.
             KERNEL = v_means2d_abs.has_value()
-                ? rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel<CDIM, float, true>
-                : rasterize_bs32_8tile_to_pixels_3dgs_bwd_kernel<CDIM, float, false>;
+                ? rasterize_bs32_multitile_to_pixels_3dgs_bwd_kernel<CDIM, float, true>
+                : rasterize_bs32_multitile_to_pixels_3dgs_bwd_kernel<CDIM, float, false>;
         }
     }
 #endif
