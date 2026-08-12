@@ -35,6 +35,14 @@
 #  else
 #    define GSPLAT_USE_WAVE64 0
 #  endif
+#else
+//   CUDA: setup.py injects -DGSPLAT_WARP_SIZE only on the ROCm path and the
+//   fallback above is inside #ifdef USE_ROCM, so nvcc never saw a definition.
+//   Harmless while every use was inside #if USE_ROCM; no longer true.
+#  ifndef GSPLAT_WARP_SIZE
+#    define GSPLAT_WARP_SIZE 32
+#  endif
+#  define GSPLAT_USE_WAVE64 0
 #endif
 
 namespace gsplat {

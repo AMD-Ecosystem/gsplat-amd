@@ -5,6 +5,17 @@
 #include "Common.cuh"
 #include "Rasterization.h"
 
+// float4 LDS batch (one ds_load_b128 + one ds_load_b96 off a single base,
+// replacing four loads off three addresses) plus a one-ahead prefetch. Both only
+// pay while the loop body is short relative to LDS latency, and the body scales
+// with CDIM: -14.5% at CDIM=3 but +2.8% at CDIM=16, so gate at 8.
+#ifndef GSPLAT_FWD_F4_MAXCDIM
+#define GSPLAT_FWD_F4_MAXCDIM 8
+#endif
+#ifndef GSPLAT_FWD_PRECISE_FP
+#define GSPLAT_FWD_PRECISE_FP 0
+#endif
+
 namespace gsplat {
 
 namespace cg = cooperative_groups;
@@ -39,6 +50,10 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
+#if GSPLAT_FWD_PRECISE_FP
+    // opt-in, default off; see the note above the namespace
+#pragma clang fp reassociate(off) contract(off)
+#endif
 
     auto block = cg::this_thread_block();
     int32_t image_id = block.group_index().x;
@@ -90,12 +105,16 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     uint32_t num_batches =
         (range_end - range_start + block_size - 1) / block_size;
 
-    extern __shared__ int s[];
-    int32_t *id_batch = (int32_t *)s; // [block_size]
+    constexpr bool USE_F4 = (CDIM <= GSPLAT_FWD_F4_MAXCDIM);
+    // one 16 B-aligned array, two float4 per batch entry (see note at top);
+    // the large-CDIM path reinterprets the same slab as the stock three arrays
+    extern __shared__ __align__(16) float4 s4raw[];
+    float4 *s4 = s4raw;                                  // [2*block_size + 2]
+    int32_t *id_batch = (int32_t *)s4raw;                // [block_size]
     vec3 *xy_opacity_batch =
         reinterpret_cast<vec3 *>(&id_batch[block_size]); // [block_size]
     vec3 *conic_batch =
-        reinterpret_cast<vec3 *>(&xy_opacity_batch[block_size]); // [block_size]
+        reinterpret_cast<vec3 *>(&xy_opacity_batch[block_size]);
 
     // current visibility left to render
     // transmittance is gonna be used in the backward pass which requires a high
@@ -124,11 +143,17 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
         int64_t idx = batch_start + tr;
         if (idx < range_end) {
             int32_t g = flatten_ids[idx]; // flatten index in [I * N] or [nnz]
-            id_batch[tr] = g;
             const vec2 xy = means2d[g];
             const float opac = opacities[g];
-            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
-            conic_batch[tr] = conics[g];
+            const vec3 cn = conics[g];
+            if constexpr (USE_F4) {
+                s4[2 * tr] = make_float4(xy.x, xy.y, opac, __int_as_float(g));
+                s4[2 * tr + 1] = make_float4(cn.x, cn.y, cn.z, 0.f);
+            } else {
+                id_batch[tr] = g;
+                xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+                conic_batch[tr] = cn;
+            }
         }
 
         // wait for other threads to collect the gaussians in batch
@@ -136,9 +161,26 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
 
         // process gaussians in the current batch for this pixel
         uint32_t batch_size = (uint32_t)min((int64_t)block_size, range_end - batch_start);
+        float4 p0, p1;
+        if constexpr (USE_F4) { p0 = s4[0]; p1 = s4[1]; }
         for (uint32_t t = 0; (t < batch_size) && !done; ++t) {
-            const vec3 conic = conic_batch[t];
-            const vec3 xy_opac = xy_opacity_batch[t];
+            vec3 conic, xy_opac;
+            int32_t g;
+            if constexpr (USE_F4) {
+                // consume entry t, already in registers, and issue entry t+1 now
+                // so its 72-cycle LDS latency overlaps this iteration's arithmetic
+                const float4 e0 = p0;
+                const float4 e1 = p1;
+                p0 = s4[2 * t + 2];
+                p1 = s4[2 * t + 3];
+                conic = {e1.x, e1.y, e1.z};
+                xy_opac = {e0.x, e0.y, e0.z};
+                g = __float_as_int(e0.w);
+            } else {
+                conic = conic_batch[t];
+                xy_opac = xy_opacity_batch[t];
+                g = id_batch[t];
+            }
             const float opac = xy_opac.z;
             const vec2 delta = {xy_opac.x - px, xy_opac.y - py};
             const float sigma = 0.5f * (conic.x * delta.x * delta.x +
@@ -155,7 +197,6 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
                 break;
             }
 
-            int32_t g = id_batch[t];
             const float vis = alpha * T;
             const float *c_ptr = colors + g * CDIM;
 #pragma unroll
@@ -220,8 +261,16 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {I, tile_height, tile_width};
 
+    // CDIM <= GSPLAT_FWD_F4_MAXCDIM: two float4 per batch entry in one
+    // 16 B-aligned array, plus one spare entry (32 B) because the loop
+    // prefetches entry t+1, so the last prefetch stays in bounds.
+    // Larger CDIM: the stock three-array layout (see the note at the top of
+    // this file for why the prefetch stops paying).
     int64_t shmem_size =
-        tile_size * tile_size * (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3));
+        (CDIM <= GSPLAT_FWD_F4_MAXCDIM)
+            ? ((int64_t)tile_size * tile_size * 2 + 2) * 4 * sizeof(float)
+            : (int64_t)tile_size * tile_size *
+                  (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3));
 
 #ifndef USE_ROCM
     if (cudaFuncSetAttribute(

@@ -616,26 +616,7 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
         // Manual emulation of labeled_partition + reduce for Gaussian-related gradients
         // This calculates the sum within the warp for a given GID.
         if (v_means != nullptr) {
-            manual_dynamic_reduce_sum_vec3(
-                v_mean_local,
-                gid, // Use GID as the label for reduction
-                warp_thread_id,
-                warp_active_mask
-            );
-        if (idx % 100000 == 0 && DEBUG_PRINT) {        
-            printf("  v_mean_local (after manual dynamic reduce sum): [%f, %f, %f]\n", v_mean_local.x, v_mean_local.y, v_mean_local.z);
-        }
-            // Elect a leader for atomic write to global memory.
-            unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
-                long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
-                if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
-                    my_gid_mask |= (1ULL << i);
-                }
-            }
-            int my_warp_leader_lane_id = get_leader_lane_id(my_gid_mask);
-
-            if (warp_thread_id == my_warp_leader_lane_id) {
+            {
                 scalar_t* target_v_means_ptr = v_means + bid * N * 3 + gid * 3;
                 // --- FIX: Cast float to scalar_t for unsafeAtomicAdd ---
                 unsafeAtomicAdd(&(target_v_means_ptr[0]), static_cast<scalar_t>(v_mean_local.x));
@@ -644,23 +625,7 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
             }
         }
         if (v_covars != nullptr) {
-            manual_dynamic_reduce_sum_mat3(
-                v_covar_local,
-                gid, // Use GID as the label for reduction
-                warp_thread_id,
-                warp_active_mask
-            );
-
-            unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
-                long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
-                if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
-                    my_gid_mask |= (1ULL << i);
-                }
-            }
-            int my_warp_leader_lane_id = get_leader_lane_id(my_gid_mask);
-
-            if (warp_thread_id == my_warp_leader_lane_id) {
+            {
                 scalar_t* target_v_covars_ptr = v_covars + bid * N * 6 + gid * 6;
                 // Accumulate unique elements of the symmetric covariance gradient
                 // --- FIX: Cast float to scalar_t for unsafeAtomicAdd ---
@@ -680,19 +645,7 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
                 quat, scale, rotmat, v_covar_local, v_quat_local, v_scale_local
             );
 
-            manual_dynamic_reduce_sum_vec4(v_quat_local, gid, warp_thread_id, warp_active_mask);
-            manual_dynamic_reduce_sum_vec3(v_scale_local, gid, warp_thread_id, warp_active_mask);
-
-            unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
-                long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
-                if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
-                    my_gid_mask |= (1ULL << i);
-                }
-            }
-            int my_warp_leader_lane_id = get_leader_lane_id(my_gid_mask);
-
-            if (warp_thread_id == my_warp_leader_lane_id) {
+            {
                 scalar_t* target_v_quats_ptr = v_quats + bid * N * 4 + gid * 4;
                 scalar_t* target_v_scales_ptr = v_scales + bid * N * 3 + gid * 3;
                 // --- FIX: Cast float to scalar_t for unsafeAtomicAdd ---

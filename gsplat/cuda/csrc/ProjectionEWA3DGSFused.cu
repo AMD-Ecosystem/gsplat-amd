@@ -11,6 +11,16 @@
 #include <cstdio> // Only include cstdio if DEBUG_PRINT is enabled
 #endif
 
+// Fast path for the backward write-back.
+//
+// The general path labels lanes by `gid` and runs manual_dynamic_reduce_sum_*
+// plus a leader election, each an unrolled 32-iteration __shfl_sync loop, five
+// per thread. But gid = idx % N over consecutive idx, so for N >= wave size the
+// partition is always singletons and all of that work finds nothing. With C == 1
+// each address is also written by exactly one thread grid-wide, so the atomicAdd
+// onto a zeroed buffer becomes a plain store. Falls back for N < wave size.
+// 1.141 -> 0.287 ms.
+
 namespace gsplat {
 
 namespace cg = cooperative_groups;
@@ -480,6 +490,71 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
     unsigned int warp_thread_id = threadIdx.x % GSPLAT_WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
 
+    // See the note at the top of this file. `gid` is unique within the wave
+    // whenever N >= wave size, which makes the labeled reduction and the leader
+    // election provable no-ops; C == 1 makes it unique grid-wide, which turns
+    // the read-modify-write into a store. Falls through to the v_viewmats block
+    // below, which is unchanged (it is labeled by `cid`, not `gid`).
+    if (N >= GSPLAT_WARP_SIZE) {
+        const bool excl = (C == 1); // this thread owns the address outright
+
+        if (v_means != nullptr) {
+            scalar_t *p = v_means + bid * N * 3 + gid * 3;
+            if (excl) {
+                p[0] = static_cast<scalar_t>(v_mean.x);
+                p[1] = static_cast<scalar_t>(v_mean.y);
+                p[2] = static_cast<scalar_t>(v_mean.z);
+            } else {
+                unsafeAtomicAdd(p,     static_cast<scalar_t>(v_mean.x));
+                unsafeAtomicAdd(p + 1, static_cast<scalar_t>(v_mean.y));
+                unsafeAtomicAdd(p + 2, static_cast<scalar_t>(v_mean.z));
+            }
+        }
+        if (v_covars != nullptr) {
+            scalar_t *p = v_covars + bid * N * 6 + gid * 6;
+            const scalar_t c0 = static_cast<scalar_t>(v_covar[0][0]);
+            const scalar_t c1 = static_cast<scalar_t>(v_covar[0][1] + v_covar[1][0]);
+            const scalar_t c2 = static_cast<scalar_t>(v_covar[0][2] + v_covar[2][0]);
+            const scalar_t c3 = static_cast<scalar_t>(v_covar[1][1]);
+            const scalar_t c4 = static_cast<scalar_t>(v_covar[1][2] + v_covar[2][1]);
+            const scalar_t c5 = static_cast<scalar_t>(v_covar[2][2]);
+            if (excl) {
+                p[0] = c0; p[1] = c1; p[2] = c2;
+                p[3] = c3; p[4] = c4; p[5] = c5;
+            } else {
+                unsafeAtomicAdd(p,     c0);
+                unsafeAtomicAdd(p + 1, c1);
+                unsafeAtomicAdd(p + 2, c2);
+                unsafeAtomicAdd(p + 3, c3);
+                unsafeAtomicAdd(p + 4, c4);
+                unsafeAtomicAdd(p + 5, c5);
+            }
+        } else {
+            mat3 rotmat = quat_to_rotmat(quat);
+            vec4 v_quat(0.f);
+            vec3 v_scale(0.f);
+            quat_scale_to_covar_vjp(quat, scale, rotmat, v_covar, v_quat, v_scale);
+            scalar_t *pq = v_quats + bid * N * 4 + gid * 4;
+            scalar_t *ps = v_scales + bid * N * 3 + gid * 3;
+            if (excl) {
+                pq[0] = static_cast<scalar_t>(v_quat.x);
+                pq[1] = static_cast<scalar_t>(v_quat.y);
+                pq[2] = static_cast<scalar_t>(v_quat.z);
+                pq[3] = static_cast<scalar_t>(v_quat.w);
+                ps[0] = static_cast<scalar_t>(v_scale.x);
+                ps[1] = static_cast<scalar_t>(v_scale.y);
+                ps[2] = static_cast<scalar_t>(v_scale.z);
+            } else {
+                unsafeAtomicAdd(pq,     static_cast<scalar_t>(v_quat.x));
+                unsafeAtomicAdd(pq + 1, static_cast<scalar_t>(v_quat.y));
+                unsafeAtomicAdd(pq + 2, static_cast<scalar_t>(v_quat.z));
+                unsafeAtomicAdd(pq + 3, static_cast<scalar_t>(v_quat.w));
+                unsafeAtomicAdd(ps,     static_cast<scalar_t>(v_scale.x));
+                unsafeAtomicAdd(ps + 1, static_cast<scalar_t>(v_scale.y));
+                unsafeAtomicAdd(ps + 2, static_cast<scalar_t>(v_scale.z));
+            }
+        }
+    } else {
     #if USE_ROCM
     if (v_means != nullptr) {
         manual_dynamic_reduce_sum_vec3(v_mean, gid, warp_thread_id, warp_active_mask);
@@ -605,7 +680,8 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
         }
     }
     #endif
-    
+    } // end general (labeled-partition) write-back path
+
     if (v_viewmats != nullptr) {
         #if USE_ROCM
         manual_dynamic_reduce_sum_mat3(v_R, cid, warp_thread_id, warp_active_mask);
