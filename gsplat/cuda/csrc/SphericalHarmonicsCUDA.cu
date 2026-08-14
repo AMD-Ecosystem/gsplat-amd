@@ -454,11 +454,12 @@ __global__ void spherical_harmonics_bwd_kernel(
     scalar_t *__restrict__ v_coeffs,       // [N, K, 3]
     scalar_t *__restrict__ v_dirs          // [N, 3] optional
 ) {
-    // One thread per element handling all three channels, instead of one thread
-    // per (element, channel). Gives three independent dependent-FMA chains per
-    // lane, lets the compiler CSE the SH basis (it depends only on `dir`, so the
-    // old mapping evaluated it three times per Gaussian), and makes v_dir
-    // thread-local so the three same-address atomics become plain stores.
+#if USE_ROCM
+    // ROCm only. One thread per element handling all three channels, instead of
+    // one thread per (element, channel). Gives three independent dependent-FMA
+    // chains per lane, lets the compiler CSE the SH basis (it depends only on
+    // `dir`, so the old mapping evaluated it three times per Gaussian), and makes
+    // v_dir thread-local so the three same-address atomics become plain stores.
     // Launcher sizes the grid over N, not N*3. NOTE sh_coeffs_to_color_fast_vjp
     // ASSIGNS to *v_dir rather than accumulating, so sum the channels here.
     // 0.918 -> 0.747 ms.
@@ -491,6 +492,34 @@ __global__ void spherical_harmonics_bwd_kernel(
         v_dirs[elem_id * 3 + 1] = static_cast<scalar_t>(v_dir_sum.y);
         v_dirs[elem_id * 3 + 2] = static_cast<scalar_t>(v_dir_sum.z);
     }
+#else
+    // parallelize over N * 3
+    uint32_t idx = cg::this_grid().thread_rank();
+    if (idx >= N * 3) {
+        return;
+    }
+    uint32_t elem_id = idx / 3;
+    uint32_t c = idx % 3; // color channel
+    if (masks != nullptr && !masks[elem_id]) {
+        return;
+    }
+
+    vec3 v_dir = {0.f, 0.f, 0.f};
+    sh_coeffs_to_color_fast_vjp(
+        degrees_to_use,
+        c,
+        dirs[elem_id],
+        coeffs + elem_id * K * 3,
+        v_colors + elem_id * 3,
+        v_coeffs + elem_id * K * 3,
+        v_dirs == nullptr ? nullptr : &v_dir
+    );
+    if (v_dirs != nullptr) {
+        unsafeAtomicAdd(v_dirs + elem_id * 3, v_dir.x);
+        unsafeAtomicAdd(v_dirs + elem_id * 3 + 1, v_dir.y);
+        unsafeAtomicAdd(v_dirs + elem_id * 3 + 2, v_dir.z);
+    }
+#endif
 }
 
 void launch_spherical_harmonics_bwd_kernel(
@@ -507,8 +536,13 @@ void launch_spherical_harmonics_bwd_kernel(
     const uint32_t K = coeffs.size(-2);
     const uint32_t N = dirs.numel() / 3;
 
+#if USE_ROCM
     // one thread per element, handling all three channels
     int64_t n_elements = N;
+#else
+    // parallelize over N * 3
+    int64_t n_elements = N * 3;
+#endif
     dim3 threads(256);
     dim3 grid((n_elements + threads.x - 1) / threads.x);
     int64_t shmem_size = 0; // No shared memory used in this kernel

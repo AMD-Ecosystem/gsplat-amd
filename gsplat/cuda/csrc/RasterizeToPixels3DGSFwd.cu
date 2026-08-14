@@ -5,15 +5,18 @@
 #include "Common.cuh"
 #include "Rasterization.h"
 
-// float4 LDS batch (one ds_load_b128 + one ds_load_b96 off a single base,
-// replacing four loads off three addresses) plus a one-ahead prefetch. Both only
-// pay while the loop body is short relative to LDS latency, and the body scales
-// with CDIM: -14.5% at CDIM=3 but +2.8% at CDIM=16, so gate at 8.
+// ROCm only. float4 LDS batch (one ds_load_b128 + one ds_load_b96 off a single
+// base, replacing four loads off three addresses) plus a one-ahead prefetch.
+// Both only pay while the loop body is short relative to LDS latency, and the
+// body scales with CDIM: -14.5% at CDIM=3 but +2.8% at CDIM=16, so gate at 8.
+#if USE_ROCM
 #ifndef GSPLAT_FWD_F4_MAXCDIM
 #define GSPLAT_FWD_F4_MAXCDIM 8
 #endif
-#ifndef GSPLAT_FWD_PRECISE_FP
-#define GSPLAT_FWD_PRECISE_FP 0
+#else
+// CUDA keeps the stock three-array batch: CDIM is never <= 0, so USE_F4 and the
+// host-side shmem sizing below both fall to the original path.
+#define GSPLAT_FWD_F4_MAXCDIM 0
 #endif
 
 namespace gsplat {
@@ -50,10 +53,6 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
-#if GSPLAT_FWD_PRECISE_FP
-    // opt-in, default off; see the note above the namespace
-#pragma clang fp reassociate(off) contract(off)
-#endif
 
     auto block = cg::this_thread_block();
     int32_t image_id = block.group_index().x;
@@ -106,11 +105,17 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
         (range_end - range_start + block_size - 1) / block_size;
 
     constexpr bool USE_F4 = (CDIM <= GSPLAT_FWD_F4_MAXCDIM);
+#if USE_ROCM
     // one 16 B-aligned array, two float4 per batch entry (see note at top);
     // the large-CDIM path reinterprets the same slab as the stock three arrays
     extern __shared__ __align__(16) float4 s4raw[];
     float4 *s4 = s4raw;                                  // [2*block_size + 2]
     int32_t *id_batch = (int32_t *)s4raw;                // [block_size]
+#else
+    extern __shared__ int s[];
+    int32_t *id_batch = (int32_t *)s;                    // [block_size]
+    float4 *s4 = nullptr; // never read: USE_F4 is false on the CUDA path
+#endif
     vec3 *xy_opacity_batch =
         reinterpret_cast<vec3 *>(&id_batch[block_size]); // [block_size]
     vec3 *conic_batch =
@@ -264,8 +269,9 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     // CDIM <= GSPLAT_FWD_F4_MAXCDIM: two float4 per batch entry in one
     // 16 B-aligned array, plus one spare entry (32 B) because the loop
     // prefetches entry t+1, so the last prefetch stays in bounds.
-    // Larger CDIM: the stock three-array layout (see the note at the top of
-    // this file for why the prefetch stops paying).
+    // Larger CDIM, and all of CUDA (where MAXCDIM is 0): the stock three-array
+    // layout (see the note at the top of this file for why prefetch stops
+    // paying).
     int64_t shmem_size =
         (CDIM <= GSPLAT_FWD_F4_MAXCDIM)
             ? ((int64_t)tile_size * tile_size * 2 + 2) * 4 * sizeof(float)

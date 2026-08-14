@@ -6,12 +6,14 @@
 #include "Intersect.h"
 #include "Utils.cuh"
 
-// Pass 2 (writing the isect ids) was 94% of this kernel. Each thread walked its
-// own Gaussian's tile bbox serially, so a wave retired only when its slowest
-// lane did: measured 6.0x imbalance, 83% of lane-slots idle. Instead the wave
-// takes the 32 rectangles one at a time and drains each with all 32 lanes, and
-// a ballot skips lanes with no work (most Gaussians are not visible). Output is
-// bit-identical. 1.924 -> 0.231 ms.
+// ROCm only; CUDA keeps the original unified body. Pass 2 (writing the isect
+// ids) was 94% of this kernel. Each thread walked its own Gaussian's tile bbox
+// serially, so a wave retired only when its slowest lane did: measured 6.0x
+// imbalance, 83% of lane-slots idle. Instead the wave takes the rectangles one
+// at a time and drains each with all lanes, and a ballot skips lanes with no
+// work (most Gaussians are not visible). Output is bit-identical.
+// 1.924 -> 0.231 ms. Wave-width agnostic: the ballot is 64-bit and the
+// incremental walk advances by GSPLAT_WARP_SIZE, so it is correct on wave64.
 
 namespace gsplat {
 
@@ -51,6 +53,8 @@ __global__ void intersect_tile_kernel(
     uint32_t idx = cg::this_grid().thread_rank();
     bool first_pass = cum_tiles_per_gauss == nullptr;
 
+#if USE_ROCM
+    // ROCm only. The CUDA branch below is the original unified body, unchanged.
     // Pass 2 (see the note at the top of this file). `first_pass` is
     // grid-uniform, so this branch is uniform and costs nothing at runtime.
     // NOTE: no lane may return before the cooperative loop — a lane that has
@@ -167,6 +171,71 @@ __global__ void intersect_tile_kernel(
     tiles_per_gauss[idx] = static_cast<int32_t>(
         (tile_max.y - tile_min.y) * (tile_max.x - tile_min.x)
     );
+#else
+    // CUDA: original unified body, both passes, one thread per Gaussian.
+    if (idx >= (packed ? nnz : I * N)) {
+        return;
+    }
+
+    const float radius_x = radii[idx * 2];
+    const float radius_y = radii[idx * 2 + 1];
+    if (radius_x <= 0 || radius_y <= 0) {
+        if (first_pass) {
+            tiles_per_gauss[idx] = 0;
+        }
+        return;
+    }
+
+    vec2 mean2d = glm::make_vec2(means2d + 2 * idx);
+
+    float tile_radius_x = radius_x / static_cast<float>(tile_size);
+    float tile_radius_y = radius_y / static_cast<float>(tile_size);
+    float tile_x = mean2d.x / static_cast<float>(tile_size);
+    float tile_y = mean2d.y / static_cast<float>(tile_size);
+
+    // tile_min is inclusive, tile_max is exclusive
+    uint2 tile_min, tile_max;
+    tile_min.x = min(max(0, (uint32_t)floor(tile_x - tile_radius_x)), tile_width);
+    tile_min.y =
+        min(max(0, (uint32_t)floor(tile_y - tile_radius_y)), tile_height);
+    tile_max.x = min(max(0, (uint32_t)ceil(tile_x + tile_radius_x)), tile_width);
+    tile_max.y = min(max(0, (uint32_t)ceil(tile_y + tile_radius_y)), tile_height);
+
+    if (first_pass) {
+        // first pass only writes out tiles_per_gauss
+        tiles_per_gauss[idx] = static_cast<int32_t>(
+            (tile_max.y - tile_min.y) * (tile_max.x - tile_min.x)
+        );
+        return;
+    }
+
+    int64_t iid; // image id
+    if (packed) {
+        // parallelize over nnz
+        iid = image_ids[idx];
+    } else {
+        // parallelize over I * N
+        iid = idx / N;
+    }
+    const int64_t iid_enc = iid << (32 + tile_n_bits);
+
+    // tolerance for negative depth
+    int32_t depth_i32 = *(int32_t *)&(depths[idx]);  // Bit-level reinterpret
+    int64_t depth_id_enc = static_cast<uint32_t>(depth_i32);  // Zero-extend to 64-bit
+
+    int64_t cur_idx = (idx == 0) ? 0 : cum_tiles_per_gauss[idx - 1];
+    for (int32_t i = tile_min.y; i < tile_max.y; ++i) {
+        for (int32_t j = tile_min.x; j < tile_max.x; ++j) {
+            int64_t tile_id = i * tile_width + j;
+            // e.g. tile_n_bits = 22:
+            // image id (10 bits) | tile id (22 bits) | depth (32 bits)
+            isect_ids[cur_idx] = iid_enc | (tile_id << 32) | depth_id_enc;
+            // the flatten index in [I * N] or [nnz]
+            flatten_ids[cur_idx] = static_cast<int32_t>(idx);
+            ++cur_idx;
+        }
+    }
+#endif
 }
 
 void launch_intersect_tile_kernel(

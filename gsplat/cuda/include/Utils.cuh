@@ -36,9 +36,14 @@
 #    define GSPLAT_USE_WAVE64 0
 #  endif
 #else
-//   CUDA: setup.py injects -DGSPLAT_WARP_SIZE only on the ROCm path and the
-//   fallback above is inside #ifdef USE_ROCM, so nvcc never saw a definition.
-//   Harmless while every use was inside #if USE_ROCM; no longer true.
+//   CUDA: setup.py injects -DGSPLAT_WARP_SIZE only on the ROCm path, and the
+//   fallback above is inside #ifdef USE_ROCM, so nvcc never gets a definition.
+//   This is NOT needed by the ROCm-only optimizations in this branch (those are
+//   all behind #if USE_ROCM). It is needed because several pre-existing uses sit
+//   outside any guard and would not compile under nvcc without it, e.g.
+//   ProjectionEWA3DGSFused.cu / ProjectionEWA3DGSPacked.cu / Projection2DGSFused.cu
+//   / Projection2DGSPacked.cu ("threadIdx.x % GSPLAT_WARP_SIZE"). NVIDIA is
+//   always 32 lanes, so this is the correct value there.
 #  ifndef GSPLAT_WARP_SIZE
 #    define GSPLAT_WARP_SIZE 32
 #  endif
