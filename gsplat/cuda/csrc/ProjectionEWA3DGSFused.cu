@@ -11,17 +11,6 @@
 #include <cstdio> // Only include cstdio if DEBUG_PRINT is enabled
 #endif
 
-// Fast path for the backward write-back. ROCm only; CUDA keeps the
-// cg::labeled_partition path unchanged.
-//
-// The general path labels lanes by `gid` and runs manual_dynamic_reduce_sum_*
-// plus a leader election, each an unrolled 32-iteration __shfl_sync loop, five
-// per thread. But gid = idx % N over consecutive idx, so for N >= wave size the
-// partition is always singletons and all of that work finds nothing. With C == 1
-// each address is also written by exactly one thread grid-wide, so the atomicAdd
-// onto a zeroed buffer becomes a plain store. Falls back for N < wave size.
-// 1.141 -> 0.287 ms.
-
 namespace gsplat {
 
 namespace cg = cooperative_groups;
@@ -487,18 +476,19 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
     // write out results with warp-level reduction
     auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 
-    // Get warp context for dynamic reductions
+#if USE_ROCM
+    // Get warp context for dynamic reductions. ROCm only: every consumer is
+    // inside a USE_ROCM block, and the CUDA path uses cg::labeled_partition.
     unsigned int warp_thread_id = threadIdx.x % GSPLAT_WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
+#endif
 
 #if USE_ROCM
-    // ROCm only. See the note at the top of this file. `gid` is unique within
-    // the wave whenever N >= wave size, which makes the labeled reduction and
-    // the leader election provable no-ops; C == 1 makes it unique grid-wide,
-    // which turns the read-modify-write into a store. Falls through to the
-    // v_viewmats block below, which is unchanged (labeled by `cid`, not `gid`).
+    // gid = idx % N over consecutive idx, so for N >= wave size the labeled
+    // reduction and leader election are provable no-ops. The v_viewmats block
+    // below keeps its reduction: it is labeled by `cid`, which lanes do share.
     if (N >= GSPLAT_WARP_SIZE) {
-        const bool excl = (C == 1); // this thread owns the address outright
+        const bool excl = (C == 1); // this thread owns the address grid-wide
 
         if (v_means != nullptr) {
             scalar_t *p = v_means + bid * N * 3 + gid * 3;
@@ -636,7 +626,7 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
                 unsafeAtomicAdd(target_v_scales_ptr + 2, static_cast<scalar_t>(v_scale.z));
             }
     }
-    } // end ROCm general (leader-election) write-back path
+    } // end N < wave size fallback
 #else
     auto warp_group_g = cg::labeled_partition(warp, gid);
     if (v_means != nullptr) {

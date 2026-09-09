@@ -6,15 +6,6 @@
 #include "Intersect.h"
 #include "Utils.cuh"
 
-// ROCm only; CUDA keeps the original unified body. Pass 2 (writing the isect
-// ids) was 94% of this kernel. Each thread walked its own Gaussian's tile bbox
-// serially, so a wave retired only when its slowest lane did: measured 6.0x
-// imbalance, 83% of lane-slots idle. Instead the wave takes the rectangles one
-// at a time and drains each with all lanes, and a ballot skips lanes with no
-// work (most Gaussians are not visible). Output is bit-identical.
-// 1.924 -> 0.231 ms. Wave-width agnostic: the ballot is 64-bit and the
-// incremental walk advances by GSPLAT_WARP_SIZE, so it is correct on wave64.
-
 namespace gsplat {
 
 namespace cg = cooperative_groups;
@@ -54,12 +45,11 @@ __global__ void intersect_tile_kernel(
     bool first_pass = cum_tiles_per_gauss == nullptr;
 
 #if USE_ROCM
-    // ROCm only. The CUDA branch below is the original unified body, unchanged.
-    // Pass 2 (see the note at the top of this file). `first_pass` is
-    // grid-uniform, so this branch is uniform and costs nothing at runtime.
-    // NOTE: no lane may return before the cooperative loop — a lane that has
-    // exited cannot be a __shfl_sync source. Out-of-range and zero-radius lanes
-    // therefore stay resident with my_cnt = 0 and just serve their neighbours.
+    // Pass 2 drains each Gaussian's tile rectangle with the whole wave rather
+    // than one thread walking it serially (6.0x lane imbalance before).
+    // Bit-identical output. `first_pass` is grid-uniform, so this costs nothing.
+    // No lane may return before the cooperative loop: an exited lane cannot be a
+    // __shfl_sync source, so empty lanes stay resident with my_cnt = 0.
     if (!first_pass) {
         const uint32_t n_elem = packed ? nnz : I * N;
         uint32_t my_cnt = 0, my_w = 1, my_tx = 0, my_ty = 0;
@@ -88,7 +78,9 @@ __global__ void intersect_tile_kernel(
                     my_tx = tile_min.x;
                     my_ty = tile_min.y;
                     const int64_t iid = packed ? image_ids[idx] : (int64_t)(idx / N);
-                    const int32_t depth_i32 = *(int32_t *)&(depths[idx]);
+                    // __float_as_int, not a pointer cast: no aliasing UB
+                    const int32_t depth_i32 =
+                        __float_as_int(static_cast<float>(depths[idx]));
                     my_hdr = (iid << (32 + tile_n_bits)) |
                              (int64_t)static_cast<uint32_t>(depth_i32);
                     my_base = (idx == 0) ? 0 : cum_tiles_per_gauss[idx - 1];
@@ -98,17 +90,14 @@ __global__ void intersect_tile_kernel(
 
         const uint32_t lane = threadIdx.x & (GSPLAT_WARP_SIZE - 1);
         const unsigned long long m = __activemask();
-        // Only iterate lanes that actually have a rectangle: the kernel is
-        // launched over ALL Gaussians but only visible ones intersect tiles, so
-        // roughly 3 lanes in 4 are empty and the fixed 32-source loop paid six
-        // shuffles for each of them.
+        // Only visit lanes that have a rectangle: ~3 in 4 are empty, and a
+        // fixed 32-source loop would pay six shuffles for each of them.
         unsigned long long src_mask = __ballot_sync(m, my_cnt != 0);
 #pragma unroll 1
         while (src_mask != 0) {
             const int src = __ffsll((unsigned long long)src_mask) - 1;
             src_mask &= ~(1ULL << src);
-            // Every one of these is wave-uniform, so the compiler keeps them in
-            // SGPRs.
+            // Wave-uniform, so these stay in SGPRs.
             const uint32_t cnt = __shfl_sync(m, my_cnt, src);
             const uint32_t w = __shfl_sync(m, my_w, src);
             const uint32_t ty = __shfl_sync(m, my_ty, src);
@@ -117,8 +106,8 @@ __global__ void intersect_tile_kernel(
             const int64_t hdr = __shfl_sync(m, my_hdr, src);
             const int32_t sidx = __shfl_sync(m, (int32_t)idx, src);
 
-            // Walk (row, col) incrementally: ONE integer division per source
-            // rectangle, not one per written entry.
+            // Walk (row, col) incrementally: one division per rectangle, not
+            // one per written entry.
             uint32_t r = lane / w;
             uint32_t c = lane - r * w;
             const uint32_t dr = GSPLAT_WARP_SIZE / w;
@@ -127,8 +116,7 @@ __global__ void intersect_tile_kernel(
                 const int64_t tile_id = (int64_t)(ty + r) * tile_width + (tx + c);
                 isect_ids[base + k] = hdr | (tile_id << 32);
                 flatten_ids[base + k] = sidx;
-                // advance by exactly GSPLAT_WARP_SIZE elements; dc < w and c < w
-                // so a single correction is always enough
+                // dc < w and c < w, so one correction always suffices
                 r += dr;
                 c += dc;
                 if (c >= w) {
@@ -220,7 +208,7 @@ __global__ void intersect_tile_kernel(
     const int64_t iid_enc = iid << (32 + tile_n_bits);
 
     // tolerance for negative depth
-    int32_t depth_i32 = *(int32_t *)&(depths[idx]);  // Bit-level reinterpret
+    int32_t depth_i32 = __float_as_int(static_cast<float>(depths[idx]));
     int64_t depth_id_enc = static_cast<uint32_t>(depth_i32);  // Zero-extend to 64-bit
 
     int64_t cur_idx = (idx == 0) ? 0 : cum_tiles_per_gauss[idx - 1];

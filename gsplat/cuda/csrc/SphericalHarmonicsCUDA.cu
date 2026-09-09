@@ -455,14 +455,10 @@ __global__ void spherical_harmonics_bwd_kernel(
     scalar_t *__restrict__ v_dirs          // [N, 3] optional
 ) {
 #if USE_ROCM
-    // ROCm only. One thread per element handling all three channels, instead of
-    // one thread per (element, channel). Gives three independent dependent-FMA
-    // chains per lane, lets the compiler CSE the SH basis (it depends only on
-    // `dir`, so the old mapping evaluated it three times per Gaussian), and makes
-    // v_dir thread-local so the three same-address atomics become plain stores.
-    // Launcher sizes the grid over N, not N*3. NOTE sh_coeffs_to_color_fast_vjp
-    // ASSIGNS to *v_dir rather than accumulating, so sum the channels here.
-    // 0.918 -> 0.747 ms.
+    // One thread per element covering all three channels, not one per
+    // (element, channel): the SH basis is CSE'd instead of evaluated three
+    // times, and v_dir becomes thread-local so three atomics become stores.
+    // NOTE sh_coeffs_to_color_fast_vjp ASSIGNS to *v_dir, so sum here.
     uint32_t elem_id = cg::this_grid().thread_rank();
     if (elem_id >= N) {
         return;

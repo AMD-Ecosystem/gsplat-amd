@@ -604,17 +604,21 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
         printf("    [%f, %f, %f]\n", v_R_local[0][2], v_R_local[1][2], v_R_local[2][2]);
         printf("  v_t_local (after W2C_VJP): [%f, %f, %f]\n", v_t_local.x, v_t_local.y, v_t_local.z);
     }
-    // Get warp context for dynamic reductions
+#if USE_ROCM
+    // Get warp context for dynamic reductions. ROCm only: every consumer is
+    // inside a USE_ROCM block, and the CUDA path uses cg::labeled_partition.
     unsigned int warp_thread_id = threadIdx.x % GSPLAT_WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
+#endif
     auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 
     // --- DENSE GRADIENT ACCUMULATION (Gaussian-specific parameters) ---
     // This path uses warp-level reductions and atomic adds to global memory.
     if (!sparse_grad) {
         #if USE_ROCM
-        // Manual emulation of labeled_partition + reduce for Gaussian-related gradients
-        // This calculates the sum within the warp for a given GID.
+        // No reduction here: unlike the fused kernel, gid = gaussian_ids[idx] is
+        // data dependent and lanes CAN share a gid, so a store would be wrong.
+        // Letting every lane atomicAdd is correct -- the atomics already combine.
         if (v_means != nullptr) {
             {
                 scalar_t* target_v_means_ptr = v_means + bid * N * 3 + gid * 3;

@@ -435,9 +435,12 @@ __global__ void projection_2dgs_fused_bwd_kernel(
     // write out results with warp-level reduction
     auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 
-    // Get warp context for dynamic reductions
+#if USE_ROCM
+    // Get warp context for dynamic reductions. ROCm only: every consumer is
+    // inside a USE_ROCM block, and the CUDA path uses cg::labeled_partition.
     unsigned int warp_thread_id = threadIdx.x % GSPLAT_WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
+#endif
 
     #if USE_ROCM
     if (v_means != nullptr) {

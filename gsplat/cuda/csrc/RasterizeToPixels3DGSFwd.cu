@@ -4,46 +4,7 @@
 #include "Common.h"
 #include "Common.cuh"
 #include "Rasterization.h"
-#include "Utils.cuh" // GSPLAT_USE_WAVE64. Common.cuh does NOT pull this in.
-
-// ROCm only. float4 LDS batch (one ds_load_b128 + one ds_load_b96 off a single
-// base, replacing four loads off three addresses) plus a one-ahead prefetch.
-// Both only pay while the loop body is short relative to LDS latency, and the
-// body scales with CDIM.
-//
-// The payoff is wave-width dependent, so the gate is too:
-//
-//   wave32 (gfx1250): -14.5% at CDIM=3, +2.8% at CDIM=16 -> gate at 8.
-//   wave64 (gfx942):  a LOSS at every CDIM the gate covers. Measured on MI300X,
-//                     N=200k C=2 1024x1024, 3 rounds, f4-on vs f4-off:
-//                       tile 8:  +2.2 +5.5 +5.9 +5.6 +6.0 +6.9%  (CDIM 1,2,3,4,5,8)
-//                       tile 16: +0.4 +1.7 +2.7 +1.7 +1.2 +0.3%
-//                       tile 32: +25.8%  (CDIM 3)
-//                     CDIM=16 control, never gated in: -0.9% / +0.8%, i.e. noise.
-//                     -> gate at 0, so wave64 keeps the stock three-array batch.
-//
-// A 64-lane wave moves twice the LDS bytes per instruction, so a single
-// one-ahead prefetch no longer covers the latency it was sized against on 32
-// lanes, and the extra 16 B-aligned slab costs occupancy that grows with tile
-// area -- hence the tile-32 figure being an order worse than tile 8.
-//
-// Override at build time with GSPLAT_EXTRA_DEFINES="GSPLAT_FWD_F4_MAXCDIM=<n>".
-#if USE_ROCM
-#if !defined(GSPLAT_USE_WAVE64)
-#error "GSPLAT_USE_WAVE64 undefined -- Utils.cuh must be included above."
-#endif
-#ifndef GSPLAT_FWD_F4_MAXCDIM
-#if GSPLAT_USE_WAVE64
-#define GSPLAT_FWD_F4_MAXCDIM 0
-#else
-#define GSPLAT_FWD_F4_MAXCDIM 8
-#endif
-#endif
-#else
-// CUDA keeps the stock three-array batch: CDIM is never <= 0, so USE_F4 and the
-// host-side shmem sizing below both fall to the original path.
-#define GSPLAT_FWD_F4_MAXCDIM 0
-#endif
+#include "Utils.cuh" // GSPLAT_FWD_F4_MAXCDIM; Common.cuh does not pull this in.
 
 namespace gsplat {
 
@@ -132,8 +93,8 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
 
     constexpr bool USE_F4 = (CDIM <= GSPLAT_FWD_F4_MAXCDIM);
 #if USE_ROCM
-    // one 16 B-aligned array, two float4 per batch entry (see note at top);
-    // the large-CDIM path reinterprets the same slab as the stock three arrays
+    // one 16 B-aligned array, two float4 per entry; the large-CDIM path
+    // reinterprets the same slab as the stock three arrays
     extern __shared__ __align__(16) float4 s4raw[];
     float4 *s4 = s4raw;                                  // [2*block_size + 2]
     int32_t *id_batch = (int32_t *)s4raw;                // [block_size]
@@ -198,8 +159,8 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
             vec3 conic, xy_opac;
             int32_t g;
             if constexpr (USE_F4) {
-                // consume entry t, already in registers, and issue entry t+1 now
-                // so its 72-cycle LDS latency overlaps this iteration's arithmetic
+                // consume entry t from registers and issue t+1 now, so its LDS
+                // latency overlaps this iteration's arithmetic
                 const float4 e0 = p0;
                 const float4 e1 = p1;
                 p0 = s4[2 * t + 2];
@@ -292,12 +253,8 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {I, tile_height, tile_width};
 
-    // CDIM <= GSPLAT_FWD_F4_MAXCDIM: two float4 per batch entry in one
-    // 16 B-aligned array, plus one spare entry (32 B) because the loop
-    // prefetches entry t+1, so the last prefetch stays in bounds.
-    // Larger CDIM, and all of CUDA (where MAXCDIM is 0): the stock three-array
-    // layout (see the note at the top of this file for why prefetch stops
-    // paying).
+    // Gated in: two float4 per entry in one 16 B-aligned array, plus one spare
+    // entry so the t+1 prefetch stays in bounds. Otherwise the stock layout.
     int64_t shmem_size =
         (CDIM <= GSPLAT_FWD_F4_MAXCDIM)
             ? ((int64_t)tile_size * tile_size * 2 + 2) * 4 * sizeof(float)
