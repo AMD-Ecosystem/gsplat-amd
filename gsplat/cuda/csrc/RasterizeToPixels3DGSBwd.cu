@@ -17,31 +17,10 @@ namespace gsplat {
 namespace cg = cooperative_groups;
 
 
-// The wave32 multi-tile backward kernel is gated on CDIM by register pressure,
-// not LDS (it uses no dynamic shared memory). VGPRs run at ~69 + 5*CDIM, which
-// costs occupancy on gfx1250: CDIM 3 -> 10 waves/SIMD, 8 -> 9, 16 -> 6. The
-// hard ceiling is 24, where the lane-scatter static_assert(NGRAD <= 32) fails.
-// Larger CDIM falls back to the generic multi-warp kernel.
-#ifndef GSPLAT_BS32_MULTITILE_MAXCDIM
-#define GSPLAT_BS32_MULTITILE_MAXCDIM 16
-#endif
-
-// Threads per multi-tile workgroup: 128, i.e. 4 wave32 waves each rasterizing
-// one 8x8 tile. Measured against 8-wave (256-thread) groups: neutral at CDIM=3,
-// 2.6% faster at CDIM=16, 4.8% faster at CDIM=8. CDIM=8 gains most because
-// resident waves per CU must be a whole multiple of the group size, and its 36
-// waves/CU (9 waves/SIMD of register budget) round down to 32 under 8-wave
-// groups but divide evenly under 4-wave ones. Register allocation is identical
-// either way, so the win is purely packing. Two bounds on this number: keep it a
-// multiple of 4 waves so they spread evenly over the four SIMD32s of a gfx1250
-// WGP, and do not go below 4, or the per-CU workgroup slot limit starts binding
-// before the register limit does.
-#define GSPLAT_BS32_MULTITILE_THREADS 128
-
 //compiler issue with mov_dpp intrinsic seen in Rocm 6.4.1, so mov_dpp intrinsic is temporarily commented out and replaced with rocprim which also uses dpp when in single wave
 // The DPP / "bs64" fast paths below assume a 64-lane wavefront; only compile
 // them for wave64 builds (gfx1250 etc. are wave32).
-#if USE_ROCM && GSPLAT_USE_WAVE64
+#if USE_ROCM && GSPLAT_WARP_SIZE == 64
 template <typename T>
 __device__ void dpp_sclr_warpSum(T &val) {
 	// T tmp = val + __builtin_amdgcn_mov_dpp(val, 0x118, 0xf, 0xf, 1); //ROW_SHR8
@@ -402,7 +381,7 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
 // 8x8) tile with CDIM <= GSPLAT_BS32_MULTITILE_MAXCDIM; every other tile shape
 // and larger CDIM go to the generic multi-warp kernel.
 // All reductions use rocprim::warp_reduce<T,32> (DPP) to match the ROCm path.
-#if USE_ROCM && !GSPLAT_USE_WAVE64
+#if USE_ROCM && GSPLAT_WARP_SIZE == 32
 
 // ---------------------------------------------------------------------------
 // MULTI-TILE: a GSPLAT_BS32_MULTITILE_THREADS-thread block == MT_WARPS wave32
@@ -1196,7 +1175,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t block_size = tile_size * tile_size;
     uint32_t max_batch_size;
     int64_t shmem_size;
-#if GSPLAT_USE_WAVE64
+#if GSPLAT_WARP_SIZE == 64
     if (block_size == 64) { // wave64-optimized path
       max_batch_size = 32;
       //max_batch_size = min(max_batch_size, block_size);
@@ -1272,7 +1251,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     }
 #else
     auto KERNEL = rasterize_to_pixels_3dgs_bwd_kernel<CDIM, float>;
-#if GSPLAT_USE_WAVE64
+#if GSPLAT_WARP_SIZE == 64
     if (block_size == 64) {
         KERNEL = rasterize_bs64_to_pixels_3dgs_bwd_kernel<CDIM, float>;
     }

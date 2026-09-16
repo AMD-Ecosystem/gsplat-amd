@@ -10,31 +10,51 @@
 #include <rocprim/functional.hpp> 
 #endif
 
-// ---------------------------------------------------------------------------
-// Wavefront size configuration (ROCm).
-// The original rocm/gsplat fork hard-codes a 64-lane wavefront (CDNA / MI3xx).
-// gfx1250 (and other RDNA/wave32 parts) use a 32-lane wavefront, where
-// rocprim::warp_reduce<...,64> and cg::tiled_partition<64> are invalid.
-// GSPLAT_WARP_SIZE selects the logical warp width used by the ROCm reduction
-// paths; GSPLAT_USE_WAVE64 gates the wave64-only DPP / "bs64" fast paths.
-// ---------------------------------------------------------------------------
+// Build-time tuning knobs, all in one place. Override any with
+// GSPLAT_EXTRA_DEFINES="GSPLAT_FWD_F4_MAXCDIM=0" at build time.
+//
+// GSPLAT_WARP_SIZE is ROCm only; nothing on the CUDA path references it. The
+// gsplat tree does not build under nvcc as it stands anyway -- RasterizeToPixels
+// {2DGS,FromWorld3DGS}Bwd.cu use rocprim::warp_reduce outside any USE_ROCM
+// guard, and rocprim is only included on the ROCm path.
 #ifdef USE_ROCM
+// setup.py detects the gfx arch and injects -DGSPLAT_WARP_SIZE for host and
+// device, so this never fires. Guessing would be silent numerical corruption on
+// a wave32 part rather than a build error, so fail loudly instead.
 #  ifndef GSPLAT_WARP_SIZE
-//   Fallback when the build system does not inject -DGSPLAT_WARP_SIZE. Prefer
-//   the device-reported wavefront size during the device pass; default to 64
-//   (CDNA / upstream behavior) otherwise. setup.py normally sets this explicitly
-//   from the detected gfx arch for BOTH host and device, which is authoritative.
-#    if defined(__AMDGCN_WAVEFRONT_SIZE__)
-#      define GSPLAT_WARP_SIZE __AMDGCN_WAVEFRONT_SIZE__
+#    error "GSPLAT_WARP_SIZE undefined -- setup.py must inject -DGSPLAT_WARP_SIZE=32|64"
+#  endif
+// Largest CDIM taking the float4 LDS batch in RasterizeToPixels3DGSFwd. The
+// batch only pays while the loop body is short relative to LDS latency, and the
+// body grows with CDIM; on wave64 it loses at every CDIM, so it is off there.
+#  ifndef GSPLAT_FWD_F4_MAXCDIM
+#    if GSPLAT_WARP_SIZE == 32
+#      define GSPLAT_FWD_F4_MAXCDIM 8
 #    else
-#      define GSPLAT_WARP_SIZE 64
+#      define GSPLAT_FWD_F4_MAXCDIM 0
 #    endif
 #  endif
-#  if GSPLAT_WARP_SIZE == 64
-#    define GSPLAT_USE_WAVE64 1
-#  else
-#    define GSPLAT_USE_WAVE64 0
+#else
+#  ifndef GSPLAT_FWD_F4_MAXCDIM
+#    define GSPLAT_FWD_F4_MAXCDIM 0
 #  endif
+#endif
+
+// Largest CDIM for the wave32 multi-tile kernel in RasterizeToPixels3DGSBwd.
+// Bounded by register pressure (VGPRs ~69 + 5*CDIM), not LDS. Hard ceiling 24,
+// where static_assert(NGRAD <= 32) fails.
+#ifndef GSPLAT_BS32_MULTITILE_MAXCDIM
+#  define GSPLAT_BS32_MULTITILE_MAXCDIM 16
+#endif
+
+// Threads per multi-tile workgroup in that same kernel: 4 wave32 waves, each
+// rasterizing one 8x8 tile. Against 8-wave (256-thread) groups: neutral at
+// CDIM 3, 2.6% faster at 16, 4.8% at 8, because resident waves per CU must be a
+// whole multiple of the group size. Keep it a multiple of 4 waves so they spread
+// over the four SIMD32s of a gfx1250 WGP, and not below 4 or the workgroup-slot
+// limit binds before the register limit does.
+#ifndef GSPLAT_BS32_MULTITILE_THREADS
+#  define GSPLAT_BS32_MULTITILE_THREADS 128
 #endif
 
 namespace gsplat {
