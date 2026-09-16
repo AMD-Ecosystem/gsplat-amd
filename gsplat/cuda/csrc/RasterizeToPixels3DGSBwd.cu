@@ -17,27 +17,6 @@ namespace gsplat {
 namespace cg = cooperative_groups;
 
 
-// The wave32 multi-tile backward kernel is gated on CDIM by register pressure,
-// not LDS (it uses no dynamic shared memory). VGPRs run at ~69 + 5*CDIM, which
-// costs occupancy on gfx1250: CDIM 3 -> 10 waves/SIMD, 8 -> 9, 16 -> 6. The
-// hard ceiling is 24, where the lane-scatter static_assert(NGRAD <= 32) fails.
-// Larger CDIM falls back to the generic multi-warp kernel.
-#ifndef GSPLAT_BS32_MULTITILE_MAXCDIM
-#define GSPLAT_BS32_MULTITILE_MAXCDIM 16
-#endif
-
-// Threads per multi-tile workgroup: 128, i.e. 4 wave32 waves each rasterizing
-// one 8x8 tile. Measured against 8-wave (256-thread) groups: neutral at CDIM=3,
-// 2.6% faster at CDIM=16, 4.8% faster at CDIM=8. CDIM=8 gains most because
-// resident waves per CU must be a whole multiple of the group size, and its 36
-// waves/CU (9 waves/SIMD of register budget) round down to 32 under 8-wave
-// groups but divide evenly under 4-wave ones. Register allocation is identical
-// either way, so the win is purely packing. Two bounds on this number: keep it a
-// multiple of 4 waves so they spread evenly over the four SIMD32s of a gfx1250
-// WGP, and do not go below 4, or the per-CU workgroup slot limit starts binding
-// before the register limit does.
-#define GSPLAT_BS32_MULTITILE_THREADS 128
-
 //compiler issue with mov_dpp intrinsic seen in Rocm 6.4.1, so mov_dpp intrinsic is temporarily commented out and replaced with rocprim which also uses dpp when in single wave
 // The DPP / "bs64" fast paths below assume a 64-lane wavefront; only compile
 // them for wave64 builds (gfx1250 etc. are wave32).

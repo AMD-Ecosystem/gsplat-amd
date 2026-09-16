@@ -47,6 +47,16 @@
 #  define GSPLAT_BS32_MULTITILE_MAXCDIM 16
 #endif
 
+// Threads per multi-tile workgroup in that same kernel: 4 wave32 waves, each
+// rasterizing one 8x8 tile. Against 8-wave (256-thread) groups: neutral at
+// CDIM 3, 2.6% faster at 16, 4.8% at 8, because resident waves per CU must be a
+// whole multiple of the group size. Keep it a multiple of 4 waves so they spread
+// over the four SIMD32s of a gfx1250 WGP, and not below 4 or the workgroup-slot
+// limit binds before the register limit does.
+#ifndef GSPLAT_BS32_MULTITILE_THREADS
+#  define GSPLAT_BS32_MULTITILE_THREADS 128
+#endif
+
 namespace gsplat {
 
 namespace cg = cooperative_groups;
