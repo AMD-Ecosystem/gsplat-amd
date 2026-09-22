@@ -6,8 +6,11 @@ pytest <THIS_PY_FILE> -s
 ```
 """
 
+import json
 import math
 import os
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -493,6 +496,122 @@ def test_fully_fused_projection_packed(
     # print(f"Comparing v_means: {v_means}")
     # print(f"Against _v_means: {_v_means}")
     torch.testing.assert_close(v_means, _v_means, rtol=1e-3, atol=1e-3)
+
+
+# Driver for test_fully_fused_projection_packed_empty. The packed forward path
+# computes `B = means.numel() / (N * 3)` before it checks `N == 0`, so a
+# zero-gaussian input divides by zero on the host and raises SIGFPE, which would
+# take down the whole pytest process. Run it in a child process so the crash is
+# observable as a non-zero exit code instead.
+_PACKED_EMPTY_DRIVER = '''
+import json
+import sys
+
+import torch
+
+from gsplat.cuda._wrapper import fully_fused_projection
+
+batch_dims = tuple(json.loads(sys.argv[1]))
+camera_model = sys.argv[2]
+
+device = torch.device("cuda:0")
+N, C = 0, 2
+width, height = 640, 480
+
+means = torch.zeros(batch_dims + (N, 3), device=device)
+quats = torch.zeros(batch_dims + (N, 4), device=device)
+scales = torch.zeros(batch_dims + (N, 3), device=device)
+K = torch.tensor(
+    [[300.0, 0.0, 320.0], [0.0, 300.0, 240.0], [0.0, 0.0, 1.0]], device=device
+)
+Ks = K.expand(batch_dims + (C, 3, 3)).contiguous()
+viewmats = torch.eye(4, device=device).expand(batch_dims + (C, 4, 4)).contiguous()
+
+(
+    batch_ids,
+    camera_ids,
+    gaussian_ids,
+    radii,
+    means2d,
+    depths,
+    conics,
+    compensations,
+) = fully_fused_projection(
+    means,
+    None,
+    quats,
+    scales,
+    viewmats,
+    Ks,
+    width,
+    height,
+    packed=True,
+    calc_compensations=True,
+    camera_model=camera_model,
+)
+torch.cuda.synchronize()
+
+shapes = {
+    "batch_ids": list(batch_ids.shape),
+    "camera_ids": list(camera_ids.shape),
+    "gaussian_ids": list(gaussian_ids.shape),
+    "radii": list(radii.shape),
+    "means2d": list(means2d.shape),
+    "depths": list(depths.shape),
+    "conics": list(conics.shape),
+    "compensations": list(compensations.shape),
+}
+print("RESULT " + json.dumps(shapes))
+'''
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("camera_model", ["pinhole", "fisheye"])
+@pytest.mark.parametrize("batch_dims", [(), (2,)])
+def test_fully_fused_projection_packed_empty(
+    tmp_path,
+    camera_model: Literal["pinhole", "ortho", "fisheye"],
+    batch_dims: Tuple[int, ...],
+):
+    """Packed projection with zero gaussians must skip the launch, not crash.
+
+    `launch_projection_ewa_3dgs_packed_fwd_kernel` guards the kernel launch with
+    `B == 0 || N == 0 || C == 0`, but both it and its caller compute
+    `B = means.numel() / (N * 3)` first, so N=0 divides by zero before the guard
+    can skip anything.
+    """
+    driver = tmp_path / "packed_empty_driver.py"
+    driver.write_text(_PACKED_EMPTY_DRIVER)
+
+    proc = subprocess.run(
+        [sys.executable, str(driver), json.dumps(list(batch_dims)), camera_model],
+        capture_output=True,
+        text=True,
+        cwd=os.path.join(os.path.dirname(__file__), ".."),
+    )
+
+    assert proc.returncode == 0, (
+        "packed projection with N=0 did not return cleanly "
+        f"(exit code {proc.returncode})\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+    result_lines = [
+        line for line in proc.stdout.splitlines() if line.startswith("RESULT ")
+    ]
+    assert result_lines, f"driver produced no result\nstdout:\n{proc.stdout}"
+    shapes = json.loads(result_lines[-1][len("RESULT ") :])
+
+    assert shapes == {
+        "batch_ids": [0],
+        "camera_ids": [0],
+        "gaussian_ids": [0],
+        "radii": [0, 2],
+        "means2d": [0, 2],
+        "depths": [0],
+        "conics": [0, 3],
+        "compensations": [0],
+    }, shapes
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
