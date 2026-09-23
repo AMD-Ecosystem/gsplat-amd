@@ -206,6 +206,57 @@ def test_proj(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("bad_z", [0.0, 1e-30])
+def test_proj_degenerate_depth_backward(test_data, bad_z: float):
+    """persp_proj_vjp must not emit NaN/Inf gradients for a degenerate depth.
+
+    The backward device function computes an unguarded ``rz = 1.f / z`` and its
+    cascaded powers ``rz2``/``rz3`` (gsplat/cuda/include/Utils.cuh). Nothing in
+    ProjectionEWASimple.cu filters near-plane points before that call, so a point
+    at (or arbitrarily close to) the camera plane reaches the reciprocal directly.
+    """
+    from gsplat.cuda._wrapper import proj, quat_scale_to_covar_preci
+    from gsplat.cuda._torch_impl import _world_to_cam
+
+    torch.manual_seed(42)
+
+    Ks = test_data["Ks"]
+    viewmats = test_data["viewmats"]
+    height = test_data["height"]
+    width = test_data["width"]
+
+    covars, _ = quat_scale_to_covar_preci(test_data["quats"], test_data["scales"])
+    means, covars = _world_to_cam(test_data["means"], covars, viewmats)
+
+    # Drive a single point to a degenerate camera-space depth, leaving every
+    # other point at its representative garden-scene depth.
+    means = means.detach().clone()
+    means[..., 0, 2] = bad_z
+    covars = covars.detach().clone()
+
+    means.requires_grad = True
+    covars.requires_grad = True
+
+    means2d, covars2d = proj(means, covars, Ks, width, height, "pinhole")
+
+    v_means2d = torch.randn_like(means2d)
+    v_covars2d = torch.randn_like(covars2d)
+    v_means, v_covars = torch.autograd.grad(
+        (means2d * v_means2d).sum() + (covars2d * v_covars2d).sum(),
+        (means, covars),
+    )
+
+    assert torch.isfinite(v_means).all(), (
+        f"non-finite v_means for z={bad_z}: "
+        f"{v_means[~torch.isfinite(v_means)].flatten()[:8]}"
+    )
+    assert torch.isfinite(v_covars).all(), (
+        f"non-finite v_covars for z={bad_z}: "
+        f"{v_covars[~torch.isfinite(v_covars)].flatten()[:8]}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("camera_model", ["pinhole", "ortho", "fisheye"])
 @pytest.mark.parametrize("fused", [False, True])
 @pytest.mark.parametrize("calc_compensations", [True, False])
