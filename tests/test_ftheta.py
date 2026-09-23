@@ -141,3 +141,114 @@ def test_rasterization(
     # imageio.imwrite(
     #     "test_ftheta.png", (renders[0, :, :, :3].cpu().numpy() * 255).astype(np.uint8)
     # )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("degenerate_scale", [0.0, 1e-8])
+def test_rasterization_degenerate_scale(
+    test_data,
+    degenerate_scale: float,
+):
+    """Degenerate (zero / near-zero) gaussian scales must not corrupt the render.
+
+    The world-space eval3d rasterizer builds the inverse-scale matrix
+    ``S = diag(1/s0, 1/s1, 1/s2)`` per gaussian
+    (RasterizeToPixelsFromWorld3DGSFwd.cu) with no eps/clamp on the reciprocal.
+    A gaussian with a zero extent along one axis therefore yields an Inf row in
+    ``S``, which flows into ``grd``/``grayDist``/``power``/``alpha`` and from
+    there into ``render_colors``/``render_alphas``.
+
+    A gaussian of zero volume covers no measurable set of rays, so the render
+    must (a) stay finite and (b) match a reference render in which those very
+    same gaussians contribute nothing (opacity forced to 0, every other input
+    and the depth ordering left untouched).
+    """
+    from gsplat.rendering import (
+        rasterization,
+        FThetaCameraDistortionParameters,
+        FThetaPolynomialType,
+    )
+
+    torch.manual_seed(42)
+    C = test_data["Ks"].shape[0]
+
+    Ks = test_data["Ks"]
+    viewmats = test_data["viewmats"]
+    height = test_data["height"]
+    width = test_data["width"]
+    quats = test_data["quats"]
+    scales = test_data["scales"]
+    means = test_data["means"]
+    opacities = test_data["opacities"]
+    colors = test_data["colors"].repeat(C, 1, 1)
+
+    # distortion parameters
+    camera_model = "ftheta"
+    distortion_params = FThetaCameraDistortionParameters(
+        reference_poly=FThetaPolynomialType.ANGLE_TO_PIXELDIST,
+        pixeldist_to_angle_poly=(
+            0.0,
+            8.4335003e-03,
+            2.3174282e-06,
+            -5.0478608e-08,
+            6.1392608e-10,
+            -1.7447865e-12,
+        ),
+        angle_to_pixeldist_poly=(
+            0.0,
+            118.43232,
+            -2.562147,
+            6.317949,
+            -10.41861,
+            3.6694396,
+        ),
+        max_angle=1000,
+        linear_cde=(9.9968284e-01, 1.8735906e-05, 1.7659619e-05),
+    )
+
+    def render(scales_in, opacities_in):
+        return rasterization(
+            means=means,
+            quats=quats,
+            scales=scales_in,
+            opacities=opacities_in,
+            colors=colors,
+            viewmats=viewmats,
+            Ks=Ks,
+            width=width,
+            height=height,
+            render_mode="RGB",
+            camera_model=camera_model,
+            packed=False,
+            ftheta_coeffs=distortion_params,
+            with_ut=True,
+            with_eval3d=True,
+        )
+
+    # find the gaussians that actually land on the image plane, so that the
+    # degenerate ones are guaranteed to reach the rasterization kernel.
+    _, _, meta = render(scales, opacities)
+    radii = meta["radii"].reshape(-1, meta["radii"].shape[-1])  # [C * N, 2]
+    visible = (radii > 0).all(dim=-1).reshape(C, -1).any(dim=0)  # [N]
+    assert visible.any(), "expected at least one visible gaussian in the test scene"
+    # the largest ones cover the most pixels -> strongest signal
+    extent = scales.sum(dim=-1) * visible
+    sel = torch.topk(extent, k=min(32, int(visible.sum().item()))).indices  # [K]
+
+    # squash the selected gaussians along one axis only: they keep a non-zero
+    # 2D footprint (so they survive projection culling) but zero volume.
+    degenerate_scales = scales.clone()
+    degenerate_scales[sel, 2] = degenerate_scale
+
+    # reference: the very same scene with those gaussians contributing nothing.
+    zeroed_opacities = opacities.clone()
+    zeroed_opacities[sel] = 0.0
+
+    renders, alphas, _ = render(degenerate_scales, opacities)
+    renders_ref, alphas_ref, _ = render(scales, zeroed_opacities)
+
+    assert torch.isfinite(renders).all(), "render_colors contains NaN/Inf"
+    assert torch.isfinite(alphas).all(), "render_alphas contains NaN/Inf"
+
+    torch.testing.assert_close(renders, renders_ref, rtol=0.0, atol=1e-2)
+    torch.testing.assert_close(alphas, alphas_ref, rtol=0.0, atol=1e-2)
