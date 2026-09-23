@@ -206,6 +206,44 @@ def test_proj(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("z", [0.0, 1e-6, -1e-6])
+def test_proj_degenerate_depth(test_data, z: float):
+    """`proj()` with the pinhole camera goes straight to `persp_proj`, which does
+    `rz = 1.f / z` with no near-plane guard (unlike the fused projection kernel).
+    Degenerate camera-space depths must not silently leak Inf/NaN into the
+    projected means / covariances.
+    """
+    from gsplat.cuda._torch_impl import _world_to_cam
+    from gsplat.cuda._wrapper import proj, quat_scale_to_covar_preci
+
+    torch.manual_seed(42)
+
+    Ks = test_data["Ks"]
+    viewmats = test_data["viewmats"]
+    height = test_data["height"]
+    width = test_data["width"]
+
+    covars, _ = quat_scale_to_covar_preci(test_data["quats"], test_data["scales"])
+    means, covars = _world_to_cam(test_data["means"], covars, viewmats)
+
+    # override the depth of a subset of the gaussians with a degenerate value
+    means = means.clone()
+    means[..., ::128, 2] = z
+    assert torch.isfinite(means).all() and torch.isfinite(covars).all()
+
+    means2d, covars2d = proj(means, covars, Ks, width, height, "pinhole")
+
+    assert torch.isfinite(means2d).all(), (
+        f"means2d has {(~torch.isfinite(means2d)).sum().item()} non-finite entries "
+        f"for camera-space depth z={z}"
+    )
+    assert torch.isfinite(covars2d).all(), (
+        f"covars2d has {(~torch.isfinite(covars2d)).sum().item()} non-finite entries "
+        f"for camera-space depth z={z}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("camera_model", ["pinhole", "ortho", "fisheye"])
 @pytest.mark.parametrize("fused", [False, True])
 @pytest.mark.parametrize("calc_compensations", [True, False])
