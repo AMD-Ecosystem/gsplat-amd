@@ -690,3 +690,59 @@ def test_sh(test_data, sh_degree: int, batch_dims: Tuple[int, ...]):
     torch.testing.assert_close(v_coeffs, _v_coeffs, rtol=1e-4, atol=1e-4)
     if sh_degree > 0:
         torch.testing.assert_close(v_dirs, _v_dirs, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("sh_degree", [1, 2, 3, 4])
+def test_sh_zero_direction(sh_degree: int):
+    """A zero-magnitude direction must not poison the SH gradients.
+
+    ``sh_coeffs_to_color_fast_vjp`` normalizes ``dir`` with an unguarded
+    ``rsqrtf(dir.x^2 + dir.y^2 + dir.z^2)``. For ``dir == (0, 0, 0)`` that
+    reciprocal is ``+inf``, so ``x = dir.x * inorm`` is ``NaN`` and the NaN
+    propagates into every higher-band ``v_coeffs`` entry and into ``v_dir``.
+    Such a direction occurs whenever a Gaussian mean coincides with the camera
+    center, and it silently corrupts the whole training step.
+    """
+    from gsplat.cuda._wrapper import spherical_harmonics
+
+    torch.manual_seed(42)
+
+    N = 8
+    coeffs = torch.randn(N, (4 + 1) ** 2, 3, device=device)
+    dirs = torch.randn(N, 3, device=device)
+    # One degenerate row mixed in with otherwise well-behaved directions.
+    zero_idx = 3
+    dirs[zero_idx] = 0.0
+    coeffs.requires_grad = True
+    dirs.requires_grad = True
+
+    colors = spherical_harmonics(sh_degree, dirs, coeffs)
+    v_colors = torch.randn_like(colors)
+    v_coeffs, v_dirs = torch.autograd.grad(
+        (colors * v_colors).sum(), (coeffs, dirs), allow_unused=True
+    )
+
+    assert torch.isfinite(v_coeffs[zero_idx]).all(), (
+        "v_coeffs for the zero-magnitude direction is not finite: "
+        f"{v_coeffs[zero_idx]}"
+    )
+    assert torch.isfinite(v_dirs[zero_idx]).all(), (
+        "v_dirs for the zero-magnitude direction is not finite: "
+        f"{v_dirs[zero_idx]}"
+    )
+
+    # The degenerate row must not be "fixed" by zeroing everything out: the
+    # remaining rows still have to agree with the reference implementation.
+    from gsplat.cuda._torch_impl import _spherical_harmonics
+
+    _colors = _spherical_harmonics(sh_degree, dirs, coeffs)
+    _v_coeffs, _v_dirs = torch.autograd.grad(
+        (_colors * v_colors).sum(), (coeffs, dirs), allow_unused=True
+    )
+    keep = torch.ones(N, dtype=torch.bool, device=device)
+    keep[zero_idx] = False
+    torch.testing.assert_close(
+        v_coeffs[keep], _v_coeffs[keep], rtol=1e-4, atol=1e-4
+    )
+    torch.testing.assert_close(v_dirs[keep], _v_dirs[keep], rtol=1e-4, atol=1e-4)
