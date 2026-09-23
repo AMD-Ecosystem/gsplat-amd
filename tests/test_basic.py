@@ -539,6 +539,57 @@ def test_isect(test_data, batch_dims: Tuple[int, ...]):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("n_isects", [0, 1])
+def test_isect_offset_encode_tiny(n_isects: int):
+    """Boundary case of `isect_offset_encode`: 0 or 1 total intersections.
+
+    With n_isects == 0 the kernel is not launched at all and the output must be
+    zero-filled; with n_isects == 1 the single thread takes the `idx == 0` and
+    the `idx == n_isects - 1` branches simultaneously, so it alone has to fill
+    both the leading and the trailing part of the (uninitialized) offsets array.
+    """
+    from gsplat.cuda._torch_impl import _isect_offset_encode
+    from gsplat.cuda._wrapper import isect_offset_encode
+
+    I = 2
+    tile_width, tile_height = 5, 3
+    n_tiles = tile_width * tile_height
+    tile_n_bits = n_tiles.bit_length()
+
+    if n_isects == 0:
+        isect_ids = torch.zeros(0, device=device, dtype=torch.int64)
+        # every entry of the [I, tile_height, tile_width] output must be zero
+        expected = torch.zeros(
+            (I, tile_height, tile_width), device=device, dtype=torch.int32
+        )
+    else:
+        # a single intersection on image 1, tile (x=2, y=1), i.e. not the very
+        # first nor the very last tile, so that both fill loops do real work.
+        image_id, tile_x, tile_y = 1, 2, 1
+        tile_id = tile_y * tile_width + tile_x
+        depth_bits = 12345  # lower 32 bits carry the depth, they must be ignored
+        isect_ids = torch.tensor(
+            [(((image_id << tile_n_bits) | tile_id) << 32) | depth_bits],
+            device=device,
+            dtype=torch.int64,
+        )
+        # offsets[j] == number of intersections stored before tile j, so it is
+        # 0 up to and including the occupied tile and 1 for every tile after it.
+        flat_id = image_id * n_tiles + tile_id
+        expected = torch.arange(I * n_tiles, device=device, dtype=torch.int32)
+        expected = (expected > flat_id).to(torch.int32)
+        expected = expected.reshape(I, tile_height, tile_width)
+
+    isect_offsets = isect_offset_encode(isect_ids, I, tile_width, tile_height)
+    _isect_offsets = _isect_offset_encode(isect_ids, I, tile_width, tile_height)
+
+    assert isect_offsets.shape == (I, tile_height, tile_width)
+    assert (isect_offsets >= 0).all(), isect_offsets
+    torch.testing.assert_close(isect_offsets, expected)
+    torch.testing.assert_close(isect_offsets, _isect_offsets)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("channels", [3, 32, 128])
 @pytest.mark.parametrize("batch_dims", [(), (2,), (1, 2)])
 def test_rasterize_to_pixels(test_data, channels: int, batch_dims: Tuple[int, ...]):
