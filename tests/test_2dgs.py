@@ -289,6 +289,312 @@ def test_fully_fused_projection_packed_2dgs(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("width, height", [(641, 481), (37, 19)])
+@pytest.mark.parametrize("batch_dims", [(), (2,)])
+def test_rasterize_to_pixels_2dgs_partial_tiles(
+    test_data, width: int, height: int, batch_dims: Tuple[int, ...]
+):
+    """Backward pass on image sizes that are not exact multiples of tile_size.
+
+    The last row/column of tiles is only partially filled, so the kernel must
+    clamp its pixel loop to the image extent: dropping the partial tiles, or
+    accumulating gradients for the out-of-image pixels of those tiles, both show
+    up as a mismatch against the pure-Pytorch reference.
+    """
+    from gsplat.cuda._torch_impl_2dgs import _rasterize_to_pixels_2dgs
+    from gsplat.cuda._wrapper import (
+        fully_fused_projection_2dgs,
+        isect_offset_encode,
+        isect_tiles,
+        rasterize_to_pixels_2dgs,
+    )
+
+    torch.manual_seed(42)
+
+    tile_size = 16
+    assert width % tile_size != 0 and height % tile_size != 0
+
+    channels = 3
+    N = test_data["means"].shape[-2]
+    C = test_data["viewmats"].shape[-3]
+    I = math.prod(batch_dims) * C
+
+    # rebuild the intrinsics for the boundary-shaped image
+    fx, fy, cx, cy = width, width, width // 2, height // 2
+    test_data.update(
+        {
+            "colors": torch.rand(C, N, channels, device=device),
+            "Ks": torch.broadcast_to(
+                torch.tensor(
+                    [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], device=device
+                ),
+                (C, 3, 3),
+            ),
+        }
+    )
+
+    test_data = expand(test_data, batch_dims)
+    Ks = test_data["Ks"]
+    viewmats = test_data["viewmats"]
+    quats = test_data["quats"]
+    scales = test_data["scales"]
+    means = test_data["means"]
+    opacities = test_data["opacities"]
+    colors = test_data["colors"]
+
+    radii, means2d, depths, ray_transforms, normals = fully_fused_projection_2dgs(
+        means, quats, scales, viewmats, Ks, width, height
+    )
+    colors = torch.cat([colors, depths[..., None]], dim=-1)
+    backgrounds = torch.zeros(batch_dims + (C, channels + 1), device=device)
+
+    # Identify intersecting tiles: the last tile row/column is partially filled
+    tile_width = math.ceil(width / float(tile_size))
+    tile_height = math.ceil(height / float(tile_size))
+    assert tile_width * tile_size > width and tile_height * tile_size > height
+    _, isect_ids, flatten_ids = isect_tiles(
+        means2d, radii, depths, tile_size, tile_width, tile_height
+    )
+    isect_offsets = isect_offset_encode(isect_ids, I, tile_width, tile_height)
+    isect_offsets = isect_offsets.reshape(batch_dims + (C, tile_height, tile_width))
+    densify = torch.zeros_like(means2d, device=means2d.device)
+
+    means2d.requires_grad = True
+    ray_transforms.requires_grad = True
+    colors.requires_grad = True
+    opacities.requires_grad = True
+    backgrounds.requires_grad = True
+    normals.requires_grad = True
+    densify.requires_grad = True
+
+    (render_colors, render_alphas, render_normals, _, _,) = rasterize_to_pixels_2dgs(
+        means2d,
+        ray_transforms,
+        colors,
+        opacities,
+        normals,
+        densify,
+        width,
+        height,
+        tile_size,
+        isect_offsets,
+        flatten_ids,
+        backgrounds=backgrounds,
+        distloss=True,
+    )
+
+    _render_colors, _render_alphas, _render_normals = _rasterize_to_pixels_2dgs(
+        means2d,
+        ray_transforms,
+        colors,
+        normals,
+        opacities,
+        width,
+        height,
+        tile_size,
+        isect_offsets,
+        flatten_ids,
+        backgrounds=backgrounds,
+    )
+
+    # the rendered buffers must be exactly the requested (non-tile-multiple) size
+    assert render_colors.shape == batch_dims + (C, height, width, channels + 1)
+    assert render_alphas.shape == batch_dims + (C, height, width, 1)
+    assert render_normals.shape == batch_dims + (C, height, width, 3)
+
+    # weight the boundary pixels (the partially filled tiles) heavily so that a
+    # wrong gradient there cannot be averaged away by the interior pixels
+    v_render_colors = torch.rand_like(render_colors)
+    v_render_alphas = torch.rand_like(render_alphas)
+    v_render_normals = torch.rand_like(render_normals)
+    for v in (v_render_colors, v_render_alphas, v_render_normals):
+        v[..., (height // tile_size) * tile_size :, :, :] *= 10.0
+        v[..., :, (width // tile_size) * tile_size :, :] *= 10.0
+
+    (
+        v_means2d,
+        v_ray_transforms,
+        v_colors,
+        v_opacities,
+        v_backgrounds,
+        v_normals,
+    ) = torch.autograd.grad(
+        (render_colors * v_render_colors).sum()
+        + (render_alphas * v_render_alphas).sum()
+        + (render_normals * v_render_normals).sum(),
+        (means2d, ray_transforms, colors, opacities, backgrounds, normals),
+    )
+
+    (
+        _v_means2d,
+        _v_ray_transforms,
+        _v_colors,
+        _v_opacities,
+        _v_backgrounds,
+        _v_normals,
+    ) = torch.autograd.grad(
+        (_render_colors * v_render_colors).sum()
+        + (_render_alphas * v_render_alphas).sum()
+        + (_render_normals * v_render_normals).sum(),
+        (means2d, ray_transforms, colors, opacities, backgrounds, normals),
+    )
+
+    # assert close forward
+    torch.testing.assert_close(render_colors, _render_colors, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(render_alphas, _render_alphas, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(render_normals, _render_normals, atol=1e-3, rtol=1e-3)
+
+    # assert close backward
+    torch.testing.assert_close(v_means2d, _v_means2d, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(
+        v_ray_transforms, _v_ray_transforms, rtol=2e-1, atol=5e-2
+    )
+    torch.testing.assert_close(v_colors, _v_colors, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(v_opacities, _v_opacities, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(v_backgrounds, _v_backgrounds, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(v_normals, _v_normals, rtol=1e-3, atol=1e-3)
+
+    # the backward must produce finite gradients everywhere, including for the
+    # Gaussians that only touch the partially filled boundary tiles
+    for g in (v_means2d, v_ray_transforms, v_colors, v_opacities, v_normals):
+        assert torch.isfinite(g).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("batch_dims", [(), (2,)])
+def test_rasterize_to_pixels_2dgs_empty(test_data, batch_dims: Tuple[int, ...]):
+    """Backward pass with zero Gaussians (N=0, no tile intersections).
+
+    With nothing to rasterize, ``rasterize_to_pixels_2dgs_bwd`` must still run
+    (or degenerately no-op) over the boundary [..., N=0, ...] tensors instead of
+    crashing or writing NaNs into the returned gradients, and every gradient
+    must match the all-background pure-PyTorch reference exactly.
+    """
+    from gsplat.cuda._torch_impl_2dgs import _rasterize_to_pixels_2dgs
+    from gsplat.cuda._wrapper import (
+        isect_offset_encode,
+        isect_tiles,
+        rasterize_to_pixels_2dgs,
+    )
+
+    torch.manual_seed(42)
+
+    tile_size = 16
+    width = test_data["width"]
+    height = test_data["height"]
+    C = test_data["viewmats"].shape[-3]
+    I = math.prod(batch_dims) * C
+    N = 0
+    channels = 3
+
+    means2d = torch.zeros(batch_dims + (C, N, 2), device=device)
+    ray_transforms = torch.zeros(batch_dims + (C, N, 3, 3), device=device)
+    colors = torch.zeros(batch_dims + (C, N, channels + 1), device=device)
+    opacities = torch.zeros(batch_dims + (C, N), device=device)
+    normals = torch.zeros(batch_dims + (C, N, 3), device=device)
+    densify = torch.zeros_like(means2d)
+    radii = torch.zeros(batch_dims + (C, N, 2), dtype=torch.int32, device=device)
+    depths = torch.zeros(batch_dims + (C, N), device=device)
+    backgrounds = torch.rand(batch_dims + (C, channels + 1), device=device)
+
+    tile_width = math.ceil(width / float(tile_size))
+    tile_height = math.ceil(height / float(tile_size))
+    _, isect_ids, flatten_ids = isect_tiles(
+        means2d, radii, depths, tile_size, tile_width, tile_height
+    )
+    isect_offsets = isect_offset_encode(isect_ids, I, tile_width, tile_height)
+    isect_offsets = isect_offsets.reshape(batch_dims + (C, tile_height, tile_width))
+
+    # sanity check: there really are no intersections to feed the kernel
+    assert flatten_ids.numel() == 0
+
+    means2d.requires_grad = True
+    ray_transforms.requires_grad = True
+    colors.requires_grad = True
+    opacities.requires_grad = True
+    backgrounds.requires_grad = True
+    normals.requires_grad = True
+    densify.requires_grad = True
+
+    (render_colors, render_alphas, render_normals, _, _,) = rasterize_to_pixels_2dgs(
+        means2d,
+        ray_transforms,
+        colors,
+        opacities,
+        normals,
+        densify,
+        width,
+        height,
+        tile_size,
+        isect_offsets,
+        flatten_ids,
+        backgrounds=backgrounds,
+        distloss=True,
+    )
+
+    _render_colors, _render_alphas, _render_normals = _rasterize_to_pixels_2dgs(
+        means2d,
+        ray_transforms,
+        colors,
+        normals,
+        opacities,
+        width,
+        height,
+        tile_size,
+        isect_offsets,
+        flatten_ids,
+        backgrounds=backgrounds,
+    )
+
+    assert torch.isfinite(render_colors).all()
+    assert torch.isfinite(render_alphas).all()
+    assert torch.isfinite(render_normals).all()
+    torch.testing.assert_close(render_colors, _render_colors, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(render_alphas, _render_alphas, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(render_normals, _render_normals, atol=1e-6, rtol=1e-6)
+
+    v_render_colors = torch.rand_like(render_colors)
+    v_render_alphas = torch.rand_like(render_alphas)
+    v_render_normals = torch.rand_like(render_normals)
+
+    (
+        v_means2d,
+        v_ray_transforms,
+        v_colors,
+        v_opacities,
+        v_backgrounds,
+        v_normals,
+    ) = torch.autograd.grad(
+        (render_colors * v_render_colors).sum()
+        + (render_alphas * v_render_alphas).sum()
+        + (render_normals * v_render_normals).sum(),
+        (means2d, ray_transforms, colors, opacities, backgrounds, normals),
+    )
+
+    (
+        _v_means2d,
+        _v_ray_transforms,
+        _v_colors,
+        _v_opacities,
+        _v_backgrounds,
+        _v_normals,
+    ) = torch.autograd.grad(
+        (_render_colors * v_render_colors).sum()
+        + (_render_alphas * v_render_alphas).sum()
+        + (_render_normals * v_render_normals).sum(),
+        (means2d, ray_transforms, colors, opacities, backgrounds, normals),
+    )
+
+    # the N=0 gradients w.r.t. per-Gaussian tensors are trivially empty; what
+    # matters is that the kernel launch did not crash or leave them non-finite,
+    # and that the background gradient (the only non-empty one) is exact.
+    for g in (v_means2d, v_ray_transforms, v_colors, v_opacities, v_normals):
+        assert g.numel() == 0
+        assert torch.isfinite(g).all()
+    torch.testing.assert_close(v_backgrounds, _v_backgrounds, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("channels", [3, 31])
 @pytest.mark.parametrize("batch_dims", [(), (2,), (1, 2)])
 def test_rasterize_to_pixels_2dgs(
