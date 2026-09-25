@@ -30,7 +30,7 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     const uint32_t tile_size,
     const uint32_t tile_width,
     const uint32_t tile_height,
-    const int32_t *__restrict__ tile_offsets, // [I, tile_height, tile_width]
+    const int64_t *__restrict__ tile_offsets, // [I, tile_height, tile_width]
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     scalar_t
         *__restrict__ render_colors, // [I, image_height, image_width, CDIM]
@@ -81,8 +81,8 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
     // have all threads in tile process the same gaussians in batches
     // first collect gaussians between range.x and range.y in batches
     // which gaussians to look through in this tile
-    int32_t range_start = tile_offsets[tile_id];
-    int32_t range_end =
+    int64_t range_start = tile_offsets[tile_id];
+    int64_t range_end =
         (image_id == I - 1) && (tile_id == tile_width * tile_height - 1)
             ? n_isects
             : tile_offsets[tile_id + 1];
@@ -120,8 +120,8 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
 
         // each thread fetch 1 gaussian from front to back
         // index of gaussian to load
-        uint32_t batch_start = range_start + block_size * b;
-        uint32_t idx = batch_start + tr;
+        int64_t batch_start = range_start + block_size * b;
+        int64_t idx = batch_start + tr;
         if (idx < range_end) {
             int32_t g = flatten_ids[idx]; // flatten index in [I * N] or [nnz]
             id_batch[tr] = g;
@@ -135,7 +135,7 @@ __global__ void rasterize_to_pixels_3dgs_fwd_kernel(
         block.sync();
 
         // process gaussians in the current batch for this pixel
-        uint32_t batch_size = min(block_size, range_end - batch_start);
+        uint32_t batch_size = (uint32_t)min((int64_t)block_size, range_end - batch_start);
         for (uint32_t t = 0; (t < batch_size) && !done; ++t) {
             const vec3 conic = conic_batch[t];
             const vec3 xy_opac = xy_opacity_batch[t];
@@ -268,7 +268,7 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
             tile_size,
             tile_width,
             tile_height,
-            tile_offsets.data_ptr<int32_t>(),
+            tile_offsets.data_ptr<int64_t>(),
             flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(),
             alphas.data_ptr<float>(),

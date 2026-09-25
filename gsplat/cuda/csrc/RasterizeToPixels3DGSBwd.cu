@@ -111,7 +111,7 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
     const uint32_t tile_size,
     const uint32_t tile_width,
     const uint32_t tile_height,
-    const int32_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
+    const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     // fwd outputs
     const scalar_t
@@ -223,9 +223,9 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
         // index of gaussian to load
         // batch end is the index of the last gaussian in the batch
         // These values can be negative so must be int32 instead of uint32
-        const int32_t batch_end = range_end - 1 - max_batch_size * b;
-        const int32_t current_batch_size = min(max_batch_size, batch_end + 1 - range_start);
-        const int32_t idx = batch_end - tr;
+        const int64_t batch_end = range_end - 1 - max_batch_size * b;
+        const uint32_t current_batch_size = (uint32_t)min((int64_t)max_batch_size, batch_end + 1 - range_start);
+        const int64_t idx = batch_end - tr;
         if (tr < current_batch_size && idx >= range_start) {
             int32_t g = flatten_ids[idx]; // flatten index in [I * N] or [nnz]
             _id_batch = g;
@@ -390,7 +390,7 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t tile_size,
     const uint32_t tile_width,
     const uint32_t tile_height,
-    const int32_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
+    const int64_t *__restrict__ tile_offsets, // [..., tile_height, tile_width]
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     // fwd outputs
     const scalar_t
@@ -446,8 +446,8 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     // have all threads in tile process the same gaussians in batches
     // first collect gaussians between range.x and range.y in batches
     // which gaussians to look through in this tile
-    int32_t range_start = tile_offsets[tile_id];
-    int32_t range_end =
+    int64_t range_start = tile_offsets[tile_id];
+    int64_t range_end =
         (image_id == I - 1) && (tile_id == tile_width * tile_height - 1)
             ? n_isects
             : tile_offsets[tile_id + 1];
@@ -527,14 +527,14 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         // batch end is the index of the last gaussian in the batch
         // These values can be negative so must be int32 instead of uint32
 #if USE_ROCM
-        const int32_t batch_end = range_end - 1 - max_batch_size * b;
-        const int32_t current_batch_size = min(max_batch_size, batch_end + 1 - range_start);
-        const int32_t idx = batch_end - tr;
+        const int64_t batch_end = range_end - 1 - max_batch_size * b;
+        const uint32_t current_batch_size = (uint32_t)min((int64_t)max_batch_size, batch_end + 1 - range_start);
+        const int64_t idx = batch_end - tr;
         if (tr < current_batch_size && idx >= range_start) {
 #else
-        const int32_t batch_end = range_end - 1 - block_size * b;
-        const int32_t batch_size = min(block_size, batch_end + 1 - range_start);
-        const int32_t idx = batch_end - tr;
+        const int64_t batch_end = range_end - 1 - block_size * b;
+        const uint32_t batch_size = (uint32_t)min((int64_t)block_size, batch_end + 1 - range_start);
+        const int64_t idx = batch_end - tr;
         if (idx >= range_start) {
 #endif
             int32_t g = flatten_ids[idx]; // flatten index in [I * N] or [nnz]
@@ -847,7 +847,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
             tile_size,
             tile_width,
             tile_height,
-            tile_offsets.data_ptr<int32_t>(),
+            tile_offsets.data_ptr<int64_t>(),
             flatten_ids.data_ptr<int32_t>(),
             render_alphas.data_ptr<float>(),
             last_ids.data_ptr<int32_t>(),

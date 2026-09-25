@@ -207,7 +207,7 @@ __global__ void intersect_offset_kernel(
     const uint32_t I,
     const uint32_t n_tiles,
     const uint32_t tile_n_bits,
-    int32_t *__restrict__ offsets // [I, n_tiles]
+    int64_t *__restrict__ offsets // [I, n_tiles]
 ) {
     // e.g., ids: [1, 1, 1, 3, 3], n_tiles = 6
     // counts: [0, 3, 0, 2, 0, 0]
@@ -227,12 +227,12 @@ __global__ void intersect_offset_kernel(
     if (idx == 0) {
         // write out the offsets until the first valid tile (inclusive)
         for (uint32_t i = 0; i < id_curr + 1; ++i)
-            offsets[i] = static_cast<int32_t>(idx);
+            offsets[i] = static_cast<int64_t>(idx);
     }
     if (idx == n_isects - 1) {
         // write out the rest of the offsets
         for (uint32_t i = id_curr + 1; i < I * n_tiles; ++i)
-            offsets[i] = static_cast<int32_t>(n_isects);
+            offsets[i] = static_cast<int64_t>(n_isects);
     }
 
     if (idx > 0) {
@@ -247,7 +247,7 @@ __global__ void intersect_offset_kernel(
         int64_t tid_prev = isect_id_prev & ((1 << tile_n_bits) - 1);
         int64_t id_prev = iid_prev * n_tiles + tid_prev;
         for (uint32_t i = id_prev + 1; i < id_curr + 1; ++i)
-            offsets[i] = static_cast<int32_t>(idx);
+            offsets[i] = static_cast<int64_t>(idx);
     }
 }
 
@@ -282,7 +282,7 @@ void launch_intersect_offset_kernel(
         I,
         n_tiles,
         tile_n_bits,
-        offsets.data_ptr<int32_t>()
+        offsets.data_ptr<int64_t>()
     );
 }
 

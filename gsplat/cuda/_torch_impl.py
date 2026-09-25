@@ -490,6 +490,7 @@ def _isect_offset_encode(
     )
 
     isect_ids_uq, counts = torch.unique_consecutive(isect_ids >> 32, return_counts=True)
+    counts = counts.to(torch.int64)
 
     image_ids_uq = isect_ids_uq >> tile_n_bits
     tile_ids_uq = isect_ids_uq & ((1 << tile_n_bits) - 1)
@@ -499,8 +500,8 @@ def _isect_offset_encode(
     tile_counts[image_ids_uq, tile_ids_y_uq, tile_ids_x_uq] = counts
 
     cum_tile_counts = torch.cumsum(tile_counts.flatten(), dim=0).reshape_as(tile_counts)
-    offsets = cum_tile_counts - tile_counts
-    return offsets.int()
+    offsets = (cum_tile_counts - tile_counts).to(torch.int64)
+    return offsets
 
 
 def accumulate(

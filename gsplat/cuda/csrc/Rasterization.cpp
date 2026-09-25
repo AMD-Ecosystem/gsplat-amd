@@ -1,5 +1,6 @@
 #include <ATen/TensorUtils.h>
 #include <ATen/core/Tensor.h>
+#include <climits>
 #include <tuple>
 
 #include <ATen/Functions.h>
@@ -47,6 +48,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
         CHECK_INPUT(masks.value());
     }
 
+    int64_t n_isects = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl = tile_offsets.contiguous();
+    if (tile_offsets_impl.scalar_type() == at::kInt) {
+        TORCH_CHECK(
+            n_isects <= INT32_MAX,
+            "tile_offsets must be int64 when n_isects > 2^31-1 (got ",
+            n_isects,
+            ")");
+        tile_offsets_impl = tile_offsets_impl.to(at::kLong);
+    }
+
     auto opt = means2d.options();
     at::DimVector image_dims(tile_offsets.sizes().slice(0, tile_offsets.dim() - 2));
     uint32_t channels = colors.size(-1);
@@ -75,7 +87,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_3dgs_fwd(
             image_width,                                                       \
             image_height,                                                      \
             tile_size,                                                         \
-            tile_offsets,                                                      \
+            tile_offsets_impl,                                                 \
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
@@ -157,6 +169,17 @@ rasterize_to_pixels_3dgs_bwd(
         CHECK_INPUT(masks.value());
     }
 
+    int64_t n_isects = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl = tile_offsets.contiguous();
+    if (tile_offsets_impl.scalar_type() == at::kInt) {
+        TORCH_CHECK(
+            n_isects <= INT32_MAX,
+            "tile_offsets must be int64 when n_isects > 2^31-1 (got ",
+            n_isects,
+            ")");
+        tile_offsets_impl = tile_offsets_impl.to(at::kLong);
+    }
+
     uint32_t channels = colors.size(-1);
 
     at::Tensor v_means2d = at::zeros_like(means2d);
@@ -180,7 +203,7 @@ rasterize_to_pixels_3dgs_bwd(
             image_width,                                                       \
             image_height,                                                      \
             tile_size,                                                         \
-            tile_offsets,                                                      \
+            tile_offsets_impl,                                                 \
             flatten_ids,                                                       \
             render_alphas,                                                     \
             last_ids,                                                          \
@@ -250,16 +273,27 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
     CHECK_INPUT(tile_offsets);
     CHECK_INPUT(flatten_ids);
 
+    int64_t n_isects = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl = tile_offsets.contiguous();
+    if (tile_offsets_impl.scalar_type() == at::kLong) {
+        TORCH_CHECK(
+            n_isects <= INT32_MAX,
+            "tile_offsets (int64) cannot be used when n_isects > 2^31-1 (got ",
+            n_isects,
+            ")");
+        tile_offsets_impl = tile_offsets_impl.to(at::kInt);
+    }
+
     auto opt = means2d.options();
     uint32_t N = means2d.size(-2); // number of gaussians
     uint32_t I = means2d.numel() / (2 * N); // number of images
 
-    uint32_t n_isects = flatten_ids.size(0);
+    uint32_t n_isects_u = flatten_ids.size(0);
 
     // First pass: count the number of gaussians that contribute to each pixel
     int64_t n_elems;
     at::Tensor chunk_starts;
-    if (n_isects) {
+    if (n_isects_u) {
         at::Tensor chunk_cnts = at::zeros(
             {I * image_height * image_width}, opt.dtype(at::kInt)
         );
@@ -273,7 +307,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
             image_width,
             image_height,
             tile_size,
-            tile_offsets,
+            tile_offsets_impl,
             flatten_ids,
             c10::nullopt, // chunk_starts
             at::optional<at::Tensor>(chunk_cnts),
@@ -301,7 +335,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
             image_width,
             image_height,
             tile_size,
-            tile_offsets,
+            tile_offsets_impl,
             flatten_ids,
             at::optional<at::Tensor>(chunk_starts),
             c10::nullopt, // chunk_cnts
@@ -355,6 +389,16 @@ rasterize_to_pixels_2dgs_fwd(
     if (masks.has_value()) {
         CHECK_INPUT(masks.value());
     }
+    int64_t n_isects_2dgs = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl_2dgs = tile_offsets.contiguous();
+    if (tile_offsets_impl_2dgs.scalar_type() == at::kLong) {
+        TORCH_CHECK(
+            n_isects_2dgs <= INT32_MAX,
+            "tile_offsets (int64) cannot be used when n_isects > 2^31-1 (got ",
+            n_isects_2dgs,
+            ")");
+        tile_offsets_impl_2dgs = tile_offsets_impl_2dgs.to(at::kInt);
+    }
     auto opt = means2d.options();
 
     at::DimVector image_dims(tile_offsets.sizes().slice(0, tile_offsets.dim() - 2));
@@ -401,7 +445,7 @@ rasterize_to_pixels_2dgs_fwd(
             image_width,                                                       \
             image_height,                                                      \
             tile_size,                                                         \
-            tile_offsets,                                                      \
+            tile_offsets_impl_2dgs,                                            \
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
@@ -516,6 +560,17 @@ rasterize_to_pixels_2dgs_bwd(
         CHECK_INPUT(masks.value());
     }
 
+    int64_t n_isects_2dgs_bwd = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl_2dgs_bwd = tile_offsets.contiguous();
+    if (tile_offsets_impl_2dgs_bwd.scalar_type() == at::kLong) {
+        TORCH_CHECK(
+            n_isects_2dgs_bwd <= INT32_MAX,
+            "tile_offsets (int64) cannot be used when n_isects > 2^31-1 (got ",
+            n_isects_2dgs_bwd,
+            ")");
+        tile_offsets_impl_2dgs_bwd = tile_offsets_impl_2dgs_bwd.to(at::kInt);
+    }
+
     uint32_t channels = colors.size(-1);
 
     at::Tensor v_means2d = at::zeros_like(means2d);
@@ -543,7 +598,7 @@ rasterize_to_pixels_2dgs_bwd(
             image_width,                                                       \
             image_height,                                                      \
             tile_size,                                                         \
-            tile_offsets,                                                      \
+            tile_offsets_impl_2dgs_bwd,                                        \
             flatten_ids,                                                       \
             render_colors,                                                     \
             render_alphas,                                                     \
@@ -626,6 +681,17 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
     CHECK_INPUT(tile_offsets);
     CHECK_INPUT(flatten_ids);
 
+    int64_t n_isects_2dgs_idx = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl_2dgs_idx = tile_offsets.contiguous();
+    if (tile_offsets_impl_2dgs_idx.scalar_type() == at::kLong) {
+        TORCH_CHECK(
+            n_isects_2dgs_idx <= INT32_MAX,
+            "tile_offsets (int64) cannot be used when n_isects > 2^31-1 (got ",
+            n_isects_2dgs_idx,
+            ")");
+        tile_offsets_impl_2dgs_idx = tile_offsets_impl_2dgs_idx.to(at::kInt);
+    }
+
     auto opt = means2d.options();
     uint32_t N = means2d.size(-2); // number of gaussians
     uint32_t I = means2d.numel() / (2 * N); // number of images
@@ -649,7 +715,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
             image_width,
             image_height,
             tile_size,
-            tile_offsets,
+            tile_offsets_impl_2dgs_idx,
             flatten_ids,
             c10::nullopt, // chunk_starts
             at::optional<at::Tensor>(chunk_cnts),
@@ -677,7 +743,7 @@ std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_2dgs(
             image_width,
             image_height,
             tile_size,
-            tile_offsets,
+            tile_offsets_impl_2dgs_idx,
             flatten_ids,
             at::optional<at::Tensor>(chunk_starts),
             c10::nullopt, // chunk_cnts
@@ -735,7 +801,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     if (masks.has_value()) {
         CHECK_INPUT(masks.value());
     }
-    
+
+    int64_t n_isects_fw = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl_fw = tile_offsets.contiguous();
+    if (tile_offsets_impl_fw.scalar_type() == at::kLong) {
+        TORCH_CHECK(
+            n_isects_fw <= INT32_MAX,
+            "tile_offsets (int64) cannot be used when n_isects > 2^31-1 (got ",
+            n_isects_fw,
+            ")");
+        tile_offsets_impl_fw = tile_offsets_impl_fw.to(at::kInt);
+    }
+
     auto opt = means.options();
     at::DimVector batch_dims(means.sizes().slice(0, means.dim() - 2));
     uint32_t C = viewmats0.size(-3);     // number of cameras
@@ -778,7 +855,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
             tangential_coeffs,                                                 \
             thin_prism_coeffs,                                                 \
             ftheta_coeffs,                                                     \
-            tile_offsets,                                                      \
+            tile_offsets_impl_fw,                                              \
             flatten_ids,                                                       \
             renders,                                                           \
             alphas,                                                            \
@@ -873,6 +950,17 @@ rasterize_to_pixels_from_world_3dgs_bwd(
         CHECK_INPUT(masks.value());
     }
 
+    int64_t n_isects_fw_bwd = flatten_ids.size(0);
+    at::Tensor tile_offsets_impl_fw_bwd = tile_offsets.contiguous();
+    if (tile_offsets_impl_fw_bwd.scalar_type() == at::kLong) {
+        TORCH_CHECK(
+            n_isects_fw_bwd <= INT32_MAX,
+            "tile_offsets (int64) cannot be used when n_isects > 2^31-1 (got ",
+            n_isects_fw_bwd,
+            ")");
+        tile_offsets_impl_fw_bwd = tile_offsets_impl_fw_bwd.to(at::kInt);
+    }
+
     uint32_t channels = colors.size(-1);
 
     at::Tensor v_means = at::zeros_like(means);
@@ -904,7 +992,7 @@ rasterize_to_pixels_from_world_3dgs_bwd(
             tangential_coeffs,                                                \
             thin_prism_coeffs,                                               \
             ftheta_coeffs,                                                     \
-            tile_offsets,                                                      \
+            tile_offsets_impl_fw_bwd,                                          \
             flatten_ids,                                                       \
             render_alphas,                                                     \
             last_ids,                                                          \

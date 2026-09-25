@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <glm/gtc/type_ptr.hpp>
+#include <torch/torch.h>
 
 #ifndef USE_ROCM
 #include <cooperative_groups.h>
@@ -34,14 +35,24 @@ namespace gsplat {
     } while (false)
 #else
 #define cub hipcub
+
+// PyTorch ROCm allocator selection
+// PyTorch 2.11 has a breaking API change in which c10::hip::HIPCachingAllocator 
+// was removed and unified into c10::cuda::CUDACachingAllocator.
+#if (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11)
+#define GSPLAT_ROCM_ALLOCATOR ::c10::cuda::CUDACachingAllocator
+#else
+#define GSPLAT_ROCM_ALLOCATOR ::c10::hip::HIPCachingAllocator
+#endif
+
 #define CUB_WRAPPER(func, ...)                                                 \
     do {                                                                       \
         size_t temp_storage_bytes = 0;                                         \
-        auto res = func(nullptr, temp_storage_bytes, __VA_ARGS__);                        \
-        auto &caching_allocator = *::c10::hip::HIPCachingAllocator::get();   \
+        auto res = func(nullptr, temp_storage_bytes, __VA_ARGS__);             \
+	auto& caching_allocator = *GSPLAT_ROCM_ALLOCATOR::get();                                               \
         auto temp_storage = caching_allocator.allocate(temp_storage_bytes);    \
-        res = func(temp_storage.get(), temp_storage_bytes, __VA_ARGS__);  \
-	assert(res == hipSuccess);                                            \
+        res = func(temp_storage.get(), temp_storage_bytes, __VA_ARGS__);       \
+	assert(res == hipSuccess);                                             \
     } while (false)
 #endif
 } // namespace gsplat

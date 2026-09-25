@@ -206,6 +206,44 @@ def test_proj(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("z", [0.0, 1e-6, -1e-6])
+def test_proj_degenerate_depth(test_data, z: float):
+    """`proj()` with the pinhole camera goes straight to `persp_proj`, which does
+    `rz = 1.f / z` with no near-plane guard (unlike the fused projection kernel).
+    Degenerate camera-space depths must not silently leak Inf/NaN into the
+    projected means / covariances.
+    """
+    from gsplat.cuda._torch_impl import _world_to_cam
+    from gsplat.cuda._wrapper import proj, quat_scale_to_covar_preci
+
+    torch.manual_seed(42)
+
+    Ks = test_data["Ks"]
+    viewmats = test_data["viewmats"]
+    height = test_data["height"]
+    width = test_data["width"]
+
+    covars, _ = quat_scale_to_covar_preci(test_data["quats"], test_data["scales"])
+    means, covars = _world_to_cam(test_data["means"], covars, viewmats)
+
+    # override the depth of a subset of the gaussians with a degenerate value
+    means = means.clone()
+    means[..., ::128, 2] = z
+    assert torch.isfinite(means).all() and torch.isfinite(covars).all()
+
+    means2d, covars2d = proj(means, covars, Ks, width, height, "pinhole")
+
+    assert torch.isfinite(means2d).all(), (
+        f"means2d has {(~torch.isfinite(means2d)).sum().item()} non-finite entries "
+        f"for camera-space depth z={z}"
+    )
+    assert torch.isfinite(covars2d).all(), (
+        f"covars2d has {(~torch.isfinite(covars2d)).sum().item()} non-finite entries "
+        f"for camera-space depth z={z}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("bad_z", [0.0, 1e-30])
 def test_proj_degenerate_depth_backward(test_data, bad_z: float):
     """persp_proj_vjp must not emit NaN/Inf gradients for a degenerate depth.
@@ -590,6 +628,57 @@ def test_isect(test_data, batch_dims: Tuple[int, ...]):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("n_isects", [0, 1])
+def test_isect_offset_encode_tiny(n_isects: int):
+    """Boundary case of `isect_offset_encode`: 0 or 1 total intersections.
+
+    With n_isects == 0 the kernel is not launched at all and the output must be
+    zero-filled; with n_isects == 1 the single thread takes the `idx == 0` and
+    the `idx == n_isects - 1` branches simultaneously, so it alone has to fill
+    both the leading and the trailing part of the (uninitialized) offsets array.
+    """
+    from gsplat.cuda._torch_impl import _isect_offset_encode
+    from gsplat.cuda._wrapper import isect_offset_encode
+
+    I = 2
+    tile_width, tile_height = 5, 3
+    n_tiles = tile_width * tile_height
+    tile_n_bits = n_tiles.bit_length()
+
+    if n_isects == 0:
+        isect_ids = torch.zeros(0, device=device, dtype=torch.int64)
+        # every entry of the [I, tile_height, tile_width] output must be zero
+        expected = torch.zeros(
+            (I, tile_height, tile_width), device=device, dtype=torch.int32
+        )
+    else:
+        # a single intersection on image 1, tile (x=2, y=1), i.e. not the very
+        # first nor the very last tile, so that both fill loops do real work.
+        image_id, tile_x, tile_y = 1, 2, 1
+        tile_id = tile_y * tile_width + tile_x
+        depth_bits = 12345  # lower 32 bits carry the depth, they must be ignored
+        isect_ids = torch.tensor(
+            [(((image_id << tile_n_bits) | tile_id) << 32) | depth_bits],
+            device=device,
+            dtype=torch.int64,
+        )
+        # offsets[j] == number of intersections stored before tile j, so it is
+        # 0 up to and including the occupied tile and 1 for every tile after it.
+        flat_id = image_id * n_tiles + tile_id
+        expected = torch.arange(I * n_tiles, device=device, dtype=torch.int32)
+        expected = (expected > flat_id).to(torch.int32)
+        expected = expected.reshape(I, tile_height, tile_width)
+
+    isect_offsets = isect_offset_encode(isect_ids, I, tile_width, tile_height)
+    _isect_offsets = _isect_offset_encode(isect_ids, I, tile_width, tile_height)
+
+    assert isect_offsets.shape == (I, tile_height, tile_width)
+    assert (isect_offsets >= 0).all(), isect_offsets
+    torch.testing.assert_close(isect_offsets, expected)
+    torch.testing.assert_close(isect_offsets, _isect_offsets)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
 @pytest.mark.parametrize("channels", [3, 32, 128])
 @pytest.mark.parametrize("batch_dims", [(), (2,), (1, 2)])
 def test_rasterize_to_pixels(test_data, channels: int, batch_dims: Tuple[int, ...]):
@@ -741,3 +830,59 @@ def test_sh(test_data, sh_degree: int, batch_dims: Tuple[int, ...]):
     torch.testing.assert_close(v_coeffs, _v_coeffs, rtol=1e-4, atol=1e-4)
     if sh_degree > 0:
         torch.testing.assert_close(v_dirs, _v_dirs, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.parametrize("sh_degree", [1, 2, 3, 4])
+def test_sh_zero_direction(sh_degree: int):
+    """A zero-magnitude direction must not poison the SH gradients.
+
+    ``sh_coeffs_to_color_fast_vjp`` normalizes ``dir`` with an unguarded
+    ``rsqrtf(dir.x^2 + dir.y^2 + dir.z^2)``. For ``dir == (0, 0, 0)`` that
+    reciprocal is ``+inf``, so ``x = dir.x * inorm`` is ``NaN`` and the NaN
+    propagates into every higher-band ``v_coeffs`` entry and into ``v_dir``.
+    Such a direction occurs whenever a Gaussian mean coincides with the camera
+    center, and it silently corrupts the whole training step.
+    """
+    from gsplat.cuda._wrapper import spherical_harmonics
+
+    torch.manual_seed(42)
+
+    N = 8
+    coeffs = torch.randn(N, (4 + 1) ** 2, 3, device=device)
+    dirs = torch.randn(N, 3, device=device)
+    # One degenerate row mixed in with otherwise well-behaved directions.
+    zero_idx = 3
+    dirs[zero_idx] = 0.0
+    coeffs.requires_grad = True
+    dirs.requires_grad = True
+
+    colors = spherical_harmonics(sh_degree, dirs, coeffs)
+    v_colors = torch.randn_like(colors)
+    v_coeffs, v_dirs = torch.autograd.grad(
+        (colors * v_colors).sum(), (coeffs, dirs), allow_unused=True
+    )
+
+    assert torch.isfinite(v_coeffs[zero_idx]).all(), (
+        "v_coeffs for the zero-magnitude direction is not finite: "
+        f"{v_coeffs[zero_idx]}"
+    )
+    assert torch.isfinite(v_dirs[zero_idx]).all(), (
+        "v_dirs for the zero-magnitude direction is not finite: "
+        f"{v_dirs[zero_idx]}"
+    )
+
+    # The degenerate row must not be "fixed" by zeroing everything out: the
+    # remaining rows still have to agree with the reference implementation.
+    from gsplat.cuda._torch_impl import _spherical_harmonics
+
+    _colors = _spherical_harmonics(sh_degree, dirs, coeffs)
+    _v_coeffs, _v_dirs = torch.autograd.grad(
+        (_colors * v_colors).sum(), (coeffs, dirs), allow_unused=True
+    )
+    keep = torch.ones(N, dtype=torch.bool, device=device)
+    keep[zero_idx] = False
+    torch.testing.assert_close(
+        v_coeffs[keep], _v_coeffs[keep], rtol=1e-4, atol=1e-4
+    )
+    torch.testing.assert_close(v_dirs[keep], _v_dirs[keep], rtol=1e-4, atol=1e-4)
