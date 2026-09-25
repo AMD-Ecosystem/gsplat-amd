@@ -579,6 +579,19 @@ quat_to_rotmat_vjp(const vec4 quat, const mat3 v_R, vec4 &v_quat) {
     v_quat += (v_quat_n - glm::dot(v_quat_n, quat_n) * quat_n) * inv_norm;
 }
 
+// Clamp scale magnitude to avoid Inf/NaN when building S^-1 = diag(1/scale).
+// A gaussian can collapse to zero extent during training (exp() of a large
+// negative log-scale underflows), and the sign is kept so axis orientation
+// survives the clamp.
+inline __device__ vec3 safe_scale(const vec3 scale) {
+    const float kMinScale = 1e-8f;
+    return vec3(
+        fabsf(scale[0]) < kMinScale ? copysignf(kMinScale, scale[0]) : scale[0],
+        fabsf(scale[1]) < kMinScale ? copysignf(kMinScale, scale[1]) : scale[1],
+        fabsf(scale[2]) < kMinScale ? copysignf(kMinScale, scale[2]) : scale[2]
+    );
+}
+
 inline __device__ void quat_scale_to_covar_preci(
     const vec4 quat,
     const vec3 scale,

@@ -216,7 +216,7 @@ __global__ void rasterize_to_pixels_from_world_3dgs_fwd_kernel(
             xyz_opacity_batch[tr] = {xyz.x, xyz.y, xyz.z, opac};
             
             const vec4 quat = quats[isect_bid * N + isect_gid];
-            vec3 scale = scales[isect_bid * N + isect_gid];
+            vec3 scale = safe_scale(scales[isect_bid * N + isect_gid]);
             
             mat3 R = quat_to_rotmat(quat);
             mat3 S = mat3(
