@@ -899,6 +899,19 @@ inline __device__ void ortho_proj_vjp(
     v_mean3d += vec3(fx * v_mean2d[0], fy * v_mean2d[1], 0.f);
 }
 
+// Clamp depth magnitude away from zero to avoid Inf/NaN in 1/z. The floor is
+// well below any sane near_plane, so this only activates for depths that
+// gsplat's own near-plane culling wouldn't already have caught (e.g. when
+// near_plane == 0). Sign is preserved so tx/ty keep the correct orientation,
+// and the same clamped value is used in both fwd (persp_proj) and vjp
+// (persp_proj_vjp) so the gradient matches the function it differentiates.
+#if USE_ROCM
+inline __device__ float safe_depth(const float z) {
+    const float kMinDepth = 1e-4f;
+    return fabsf(z) < kMinDepth ? copysignf(kMinDepth, z) : z;
+}
+#endif
+
 inline __device__ void persp_proj(
     // inputs
     const vec3 mean3d,
@@ -909,21 +922,11 @@ inline __device__ void persp_proj(
     const float cy,
     const uint32_t width,
     const uint32_t height,
-#if USE_ROCM
-    const float near_plane,
-#endif
     // outputs
     mat2 &cov2d,
     vec2 &mean2d
 ) {
     float x = mean3d[0], y = mean3d[1], z = mean3d[2];
-
-#if USE_ROCM
-    // Clamp depth to avoid instability near z ~= 0.
-    const float kMinDepth = 1e-4f;
-    const float min_depth = fmaxf(near_plane, kMinDepth);
-    float z_safe = fabsf(z) < min_depth ? copysignf(min_depth, z) : z;
-#endif
 
     float tan_fovx = 0.5f * width / fx;
     float tan_fovy = 0.5f * height / fy;
@@ -933,6 +936,7 @@ inline __device__ void persp_proj(
     float lim_y_neg = cy / fy + 0.3f * tan_fovy;
 
 #if USE_ROCM
+    float z_safe = safe_depth(z);
     float rz = 1.f / z_safe;
     float rz2 = rz * rz;
     float tx = z_safe * min(lim_x_pos, max(-lim_x_neg, x * rz));
@@ -976,12 +980,6 @@ inline __device__ void persp_proj_vjp(
 ) {
     float x = mean3d[0], y = mean3d[1], z = mean3d[2];
 
-#if USE_ROCM
-    // Clamp depth in backward to avoid exploding gradients near z ~= 0.
-    const float kMinDepth = 1e-4f;
-    float z_safe = fabsf(z) < kMinDepth ? copysignf(kMinDepth, z) : z;
-#endif
-
     float tan_fovx = 0.5f * width / fx;
     float tan_fovy = 0.5f * height / fy;
     float lim_x_pos = (width - cx) / fx + 0.3f * tan_fovx;
@@ -990,6 +988,7 @@ inline __device__ void persp_proj_vjp(
     float lim_y_neg = cy / fy + 0.3f * tan_fovy;
 
 #if USE_ROCM
+    float z_safe = safe_depth(z);
     float rz = 1.f / z_safe;
     float rz2 = rz * rz;
     float tx = z_safe * min(lim_x_pos, max(-lim_x_neg, x * rz));
