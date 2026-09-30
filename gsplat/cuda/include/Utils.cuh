@@ -579,6 +579,19 @@ quat_to_rotmat_vjp(const vec4 quat, const mat3 v_R, vec4 &v_quat) {
     v_quat += (v_quat_n - glm::dot(v_quat_n, quat_n) * quat_n) * inv_norm;
 }
 
+// Clamp scale magnitude to avoid Inf/NaN when building S^-1 = diag(1/scale).
+// A gaussian can collapse to zero extent during training (exp() of a large
+// negative log-scale underflows), and the sign is kept so axis orientation
+// survives the clamp.
+inline __device__ vec3 safe_scale(const vec3 scale) {
+    const float kMinScale = 1e-8f;
+    return vec3(
+        fabsf(scale[0]) < kMinScale ? copysignf(kMinScale, scale[0]) : scale[0],
+        fabsf(scale[1]) < kMinScale ? copysignf(kMinScale, scale[1]) : scale[1],
+        fabsf(scale[2]) < kMinScale ? copysignf(kMinScale, scale[2]) : scale[2]
+    );
+}
+
 inline __device__ void quat_scale_to_covar_preci(
     const vec4 quat,
     const vec3 scale,
@@ -886,6 +899,19 @@ inline __device__ void ortho_proj_vjp(
     v_mean3d += vec3(fx * v_mean2d[0], fy * v_mean2d[1], 0.f);
 }
 
+// Clamp depth magnitude away from zero to avoid Inf/NaN in 1/z. The floor is
+// well below any sane near_plane, so this only activates for depths that
+// gsplat's own near-plane culling wouldn't already have caught (e.g. when
+// near_plane == 0). Sign is preserved so tx/ty keep the correct orientation,
+// and the same clamped value is used in both fwd (persp_proj) and vjp
+// (persp_proj_vjp) so the gradient matches the function it differentiates.
+#if USE_ROCM
+inline __device__ float safe_depth(const float z) {
+    const float kMinDepth = 1e-4f;
+    return fabsf(z) < kMinDepth ? copysignf(kMinDepth, z) : z;
+}
+#endif
+
 inline __device__ void persp_proj(
     // inputs
     const vec3 mean3d,
@@ -896,21 +922,11 @@ inline __device__ void persp_proj(
     const float cy,
     const uint32_t width,
     const uint32_t height,
-#if USE_ROCM
-    const float near_plane,
-#endif
     // outputs
     mat2 &cov2d,
     vec2 &mean2d
 ) {
     float x = mean3d[0], y = mean3d[1], z = mean3d[2];
-
-#if USE_ROCM
-    // Clamp depth to avoid instability near z ~= 0.
-    const float kMinDepth = 1e-4f;
-    const float min_depth = fmaxf(near_plane, kMinDepth);
-    float z_safe = fabsf(z) < min_depth ? copysignf(min_depth, z) : z;
-#endif
 
     float tan_fovx = 0.5f * width / fx;
     float tan_fovy = 0.5f * height / fy;
@@ -920,6 +936,7 @@ inline __device__ void persp_proj(
     float lim_y_neg = cy / fy + 0.3f * tan_fovy;
 
 #if USE_ROCM
+    float z_safe = safe_depth(z);
     float rz = 1.f / z_safe;
     float rz2 = rz * rz;
     float tx = z_safe * min(lim_x_pos, max(-lim_x_neg, x * rz));
@@ -963,12 +980,6 @@ inline __device__ void persp_proj_vjp(
 ) {
     float x = mean3d[0], y = mean3d[1], z = mean3d[2];
 
-#if USE_ROCM
-    // Clamp depth in backward to avoid exploding gradients near z ~= 0.
-    const float kMinDepth = 1e-4f;
-    float z_safe = fabsf(z) < kMinDepth ? copysignf(kMinDepth, z) : z;
-#endif
-
     float tan_fovx = 0.5f * width / fx;
     float tan_fovy = 0.5f * height / fy;
     float lim_x_pos = (width - cx) / fx + 0.3f * tan_fovx;
@@ -977,6 +988,7 @@ inline __device__ void persp_proj_vjp(
     float lim_y_neg = cy / fy + 0.3f * tan_fovy;
 
 #if USE_ROCM
+    float z_safe = safe_depth(z);
     float rz = 1.f / z_safe;
     float rz2 = rz * rz;
     float tx = z_safe * min(lim_x_pos, max(-lim_x_neg, x * rz));

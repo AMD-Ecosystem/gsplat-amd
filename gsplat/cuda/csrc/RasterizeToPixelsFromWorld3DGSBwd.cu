@@ -282,7 +282,7 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
                 const vec4 xyz_opac = xyz_opacity_batch[t];
                 opac = xyz_opac[3];
                 xyz = {xyz_opac[0], xyz_opac[1], xyz_opac[2]};
-                scale = scale_batch[t];
+                scale = safe_scale(scale_batch[t]);
                 quat = quat_batch[t];
                 
                 R = quat_to_rotmat(quat);

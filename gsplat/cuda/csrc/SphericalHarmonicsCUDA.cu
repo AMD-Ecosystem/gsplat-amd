@@ -28,7 +28,10 @@ __device__ void sh_coeffs_to_color_fast(
     if (degree >= 1) {
         // Normally rsqrt is faster than sqrt, but --use_fast_math will optimize
         // sqrt on single precision, so we use sqrt here.
-        float inorm = rsqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+        // dir is unnormalized (means - campos) and is zero when a gaussian sits
+        // on the camera centre, where rsqrtf would return Inf.
+        const float l = dir.x * dir.x + dir.y * dir.y + dir.z * dir.z;
+        float inorm = l > 0.0f ? rsqrtf(l) : 0.0f;
         float x = dir.x * inorm;
         float y = dir.y * inorm;
         float z = dir.z * inorm;
@@ -124,7 +127,11 @@ __device__ void sh_coeffs_to_color_fast_vjp(
     if (degree < 1) {
         return;
     }
-    float inorm = rsqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    // Zero-length dir (gaussian on the camera centre) would make rsqrtf Inf and
+    // NaN out every band of v_coeffs; inorm = 0 also zeroes v_dir below, which
+    // is correct since a degenerate direction carries no view-dependent signal.
+    const float l = dir.x * dir.x + dir.y * dir.y + dir.z * dir.z;
+    float inorm = l > 0.0f ? rsqrtf(l) : 0.0f;
     float x = dir.x * inorm;
     float y = dir.y * inorm;
     float z = dir.z * inorm;

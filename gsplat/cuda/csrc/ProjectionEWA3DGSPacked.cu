@@ -134,9 +134,6 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
                 Ks[5],
                 image_width,
                 image_height,
-            #if USE_ROCM
-                near_plane,
-            #endif
                 covar2d,
                 mean2d
             );
