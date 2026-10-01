@@ -27,7 +27,7 @@ void launch_rasterize_to_pixels_3dgs_fwd_kernel(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
     // intersections
     const at::Tensor tile_offsets, // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,  // [n_isects]
@@ -49,7 +49,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     // image size
     const uint32_t image_width,
     const uint32_t image_height,
-    const uint32_t tile_size,
+    const uint32_t tile_size,   // tile width in pixels
     // intersections
     const at::Tensor tile_offsets,    // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,     // [n_isects]
