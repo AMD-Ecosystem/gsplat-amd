@@ -119,6 +119,9 @@ __global__ void projection_ewa_3dgs_fused_fwd_kernel(
             Ks[5],
             image_width,
             image_height,
+        #if USE_ROCM
+            near_plane,
+        #endif
             covar2d,
             mean2d
         );
@@ -473,11 +476,77 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
     // write out results with warp-level reduction
     auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 
-    // Get warp context for dynamic reductions
-    unsigned int warp_thread_id = threadIdx.x % 64;
+#if USE_ROCM
+    // Get warp context for dynamic reductions. ROCm only: every consumer is
+    // inside a USE_ROCM block, and the CUDA path uses cg::labeled_partition.
+    unsigned int warp_thread_id = threadIdx.x % GSPLAT_WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
+#endif
 
-    #if USE_ROCM
+#if USE_ROCM
+    // gid = idx % N over consecutive idx, so for N >= wave size the labeled
+    // reduction and leader election are provable no-ops. The v_viewmats block
+    // below keeps its reduction: it is labeled by `cid`, which lanes do share.
+    if (N >= GSPLAT_WARP_SIZE) {
+        const bool excl = (C == 1); // this thread owns the address grid-wide
+
+        if (v_means != nullptr) {
+            scalar_t *p = v_means + bid * N * 3 + gid * 3;
+            if (excl) {
+                p[0] = static_cast<scalar_t>(v_mean.x);
+                p[1] = static_cast<scalar_t>(v_mean.y);
+                p[2] = static_cast<scalar_t>(v_mean.z);
+            } else {
+                unsafeAtomicAdd(p,     static_cast<scalar_t>(v_mean.x));
+                unsafeAtomicAdd(p + 1, static_cast<scalar_t>(v_mean.y));
+                unsafeAtomicAdd(p + 2, static_cast<scalar_t>(v_mean.z));
+            }
+        }
+        if (v_covars != nullptr) {
+            scalar_t *p = v_covars + bid * N * 6 + gid * 6;
+            const scalar_t c0 = static_cast<scalar_t>(v_covar[0][0]);
+            const scalar_t c1 = static_cast<scalar_t>(v_covar[0][1] + v_covar[1][0]);
+            const scalar_t c2 = static_cast<scalar_t>(v_covar[0][2] + v_covar[2][0]);
+            const scalar_t c3 = static_cast<scalar_t>(v_covar[1][1]);
+            const scalar_t c4 = static_cast<scalar_t>(v_covar[1][2] + v_covar[2][1]);
+            const scalar_t c5 = static_cast<scalar_t>(v_covar[2][2]);
+            if (excl) {
+                p[0] = c0; p[1] = c1; p[2] = c2;
+                p[3] = c3; p[4] = c4; p[5] = c5;
+            } else {
+                unsafeAtomicAdd(p,     c0);
+                unsafeAtomicAdd(p + 1, c1);
+                unsafeAtomicAdd(p + 2, c2);
+                unsafeAtomicAdd(p + 3, c3);
+                unsafeAtomicAdd(p + 4, c4);
+                unsafeAtomicAdd(p + 5, c5);
+            }
+        } else {
+            mat3 rotmat = quat_to_rotmat(quat);
+            vec4 v_quat(0.f);
+            vec3 v_scale(0.f);
+            quat_scale_to_covar_vjp(quat, scale, rotmat, v_covar, v_quat, v_scale);
+            scalar_t *pq = v_quats + bid * N * 4 + gid * 4;
+            scalar_t *ps = v_scales + bid * N * 3 + gid * 3;
+            if (excl) {
+                pq[0] = static_cast<scalar_t>(v_quat.x);
+                pq[1] = static_cast<scalar_t>(v_quat.y);
+                pq[2] = static_cast<scalar_t>(v_quat.z);
+                pq[3] = static_cast<scalar_t>(v_quat.w);
+                ps[0] = static_cast<scalar_t>(v_scale.x);
+                ps[1] = static_cast<scalar_t>(v_scale.y);
+                ps[2] = static_cast<scalar_t>(v_scale.z);
+            } else {
+                unsafeAtomicAdd(pq,     static_cast<scalar_t>(v_quat.x));
+                unsafeAtomicAdd(pq + 1, static_cast<scalar_t>(v_quat.y));
+                unsafeAtomicAdd(pq + 2, static_cast<scalar_t>(v_quat.z));
+                unsafeAtomicAdd(pq + 3, static_cast<scalar_t>(v_quat.w));
+                unsafeAtomicAdd(ps,     static_cast<scalar_t>(v_scale.x));
+                unsafeAtomicAdd(ps + 1, static_cast<scalar_t>(v_scale.y));
+                unsafeAtomicAdd(ps + 2, static_cast<scalar_t>(v_scale.z));
+            }
+        }
+    } else {
     if (v_means != nullptr) {
         manual_dynamic_reduce_sum_vec3(v_mean, gid, warp_thread_id, warp_active_mask);
 
@@ -487,7 +556,7 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
 
         // Elect a leader for atomic write to global memory.
         unsigned long long my_gid_mask = 0;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
             long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
             if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
                 my_gid_mask |= (1ULL << i);
@@ -508,7 +577,7 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
 
         // Elect a leader for atomic write to global memory.
         unsigned long long my_gid_mask = 0;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
             long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
             if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
                 my_gid_mask |= (1ULL << i);
@@ -536,7 +605,7 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
             manual_dynamic_reduce_sum_vec3(v_scale, gid, warp_thread_id, warp_active_mask);
 
             unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < 64; ++i) {
+            for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
                 long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
                 if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
                     my_gid_mask |= (1ULL << i);
@@ -557,7 +626,8 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
                 unsafeAtomicAdd(target_v_scales_ptr + 2, static_cast<scalar_t>(v_scale.z));
             }
     }
-    #else
+    } // end N < wave size fallback
+#else
     auto warp_group_g = cg::labeled_partition(warp, gid);
     if (v_means != nullptr) {
         warpSum(v_mean, warp_group_g);
@@ -601,15 +671,15 @@ __global__ void projection_ewa_3dgs_fused_bwd_kernel(
             unsafeAtomicAdd(v_scales + 2, v_scale[2]);
         }
     }
-    #endif
-    
+#endif
+
     if (v_viewmats != nullptr) {
         #if USE_ROCM
         manual_dynamic_reduce_sum_mat3(v_R, cid, warp_thread_id, warp_active_mask);
         manual_dynamic_reduce_sum_vec3(v_t, cid, warp_thread_id, warp_active_mask);
 
         unsigned long long my_cid_mask = 0;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
             long long lane_cid_temp = __shfl_sync(warp_active_mask, cid, i);
             if ((warp_active_mask & (1ULL << i)) && (lane_cid_temp == cid)) {
                 my_cid_mask |= (1ULL << i);

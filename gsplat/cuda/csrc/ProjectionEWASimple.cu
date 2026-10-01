@@ -48,7 +48,11 @@ __global__ void projection_ewa_simple_fwd_kernel(
 
     switch (camera_model) {
     case CameraModelType::PINHOLE: // perspective projection
+    #if USE_ROCM
+        persp_proj(mean, covar, fx, fy, cx, cy, width, height, 0.0f, covar2d, mean2d);
+    #else
         persp_proj(mean, covar, fx, fy, cx, cy, width, height, covar2d, mean2d);
+    #endif
         break;
     case CameraModelType::ORTHO: // orthographic projection
         ortho_proj(mean, covar, fx, fy, cx, cy, width, height, covar2d, mean2d);

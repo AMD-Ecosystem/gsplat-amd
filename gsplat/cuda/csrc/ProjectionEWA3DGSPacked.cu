@@ -134,6 +134,9 @@ __global__ void projection_ewa_3dgs_packed_fwd_kernel(
                 Ks[5],
                 image_width,
                 image_height,
+            #if USE_ROCM
+                near_plane,
+            #endif
                 covar2d,
                 mean2d
             );
@@ -601,38 +604,23 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
         printf("    [%f, %f, %f]\n", v_R_local[0][2], v_R_local[1][2], v_R_local[2][2]);
         printf("  v_t_local (after W2C_VJP): [%f, %f, %f]\n", v_t_local.x, v_t_local.y, v_t_local.z);
     }
-    // Get warp context for dynamic reductions
-    unsigned int warp_thread_id = threadIdx.x % 64;
+#if USE_ROCM
+    // Get warp context for dynamic reductions. ROCm only: every consumer is
+    // inside a USE_ROCM block, and the CUDA path uses cg::labeled_partition.
+    unsigned int warp_thread_id = threadIdx.x % GSPLAT_WARP_SIZE;
     unsigned long long warp_active_mask = __activemask();
+#endif
     auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 
     // --- DENSE GRADIENT ACCUMULATION (Gaussian-specific parameters) ---
     // This path uses warp-level reductions and atomic adds to global memory.
     if (!sparse_grad) {
         #if USE_ROCM
-        // Manual emulation of labeled_partition + reduce for Gaussian-related gradients
-        // This calculates the sum within the warp for a given GID.
+        // No reduction here: unlike the fused kernel, gid = gaussian_ids[idx] is
+        // data dependent and lanes CAN share a gid, so a store would be wrong.
+        // Letting every lane atomicAdd is correct -- the atomics already combine.
         if (v_means != nullptr) {
-            manual_dynamic_reduce_sum_vec3(
-                v_mean_local,
-                gid, // Use GID as the label for reduction
-                warp_thread_id,
-                warp_active_mask
-            );
-        if (idx % 100000 == 0 && DEBUG_PRINT) {        
-            printf("  v_mean_local (after manual dynamic reduce sum): [%f, %f, %f]\n", v_mean_local.x, v_mean_local.y, v_mean_local.z);
-        }
-            // Elect a leader for atomic write to global memory.
-            unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < 64; ++i) {
-                long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
-                if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
-                    my_gid_mask |= (1ULL << i);
-                }
-            }
-            int my_warp_leader_lane_id = get_leader_lane_id(my_gid_mask);
-
-            if (warp_thread_id == my_warp_leader_lane_id) {
+            {
                 scalar_t* target_v_means_ptr = v_means + bid * N * 3 + gid * 3;
                 // --- FIX: Cast float to scalar_t for unsafeAtomicAdd ---
                 unsafeAtomicAdd(&(target_v_means_ptr[0]), static_cast<scalar_t>(v_mean_local.x));
@@ -641,23 +629,7 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
             }
         }
         if (v_covars != nullptr) {
-            manual_dynamic_reduce_sum_mat3(
-                v_covar_local,
-                gid, // Use GID as the label for reduction
-                warp_thread_id,
-                warp_active_mask
-            );
-
-            unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < 64; ++i) {
-                long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
-                if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
-                    my_gid_mask |= (1ULL << i);
-                }
-            }
-            int my_warp_leader_lane_id = get_leader_lane_id(my_gid_mask);
-
-            if (warp_thread_id == my_warp_leader_lane_id) {
+            {
                 scalar_t* target_v_covars_ptr = v_covars + bid * N * 6 + gid * 6;
                 // Accumulate unique elements of the symmetric covariance gradient
                 // --- FIX: Cast float to scalar_t for unsafeAtomicAdd ---
@@ -677,19 +649,7 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
                 quat, scale, rotmat, v_covar_local, v_quat_local, v_scale_local
             );
 
-            manual_dynamic_reduce_sum_vec4(v_quat_local, gid, warp_thread_id, warp_active_mask);
-            manual_dynamic_reduce_sum_vec3(v_scale_local, gid, warp_thread_id, warp_active_mask);
-
-            unsigned long long my_gid_mask = 0;
-            for (int i = 0; i < 64; ++i) {
-                long long lane_gid_temp = __shfl_sync(warp_active_mask, gid, i);
-                if ((warp_active_mask & (1ULL << i)) && (lane_gid_temp == gid)) {
-                    my_gid_mask |= (1ULL << i);
-                }
-            }
-            int my_warp_leader_lane_id = get_leader_lane_id(my_gid_mask);
-
-            if (warp_thread_id == my_warp_leader_lane_id) {
+            {
                 scalar_t* target_v_quats_ptr = v_quats + bid * N * 4 + gid * 4;
                 scalar_t* target_v_scales_ptr = v_scales + bid * N * 3 + gid * 3;
                 // --- FIX: Cast float to scalar_t for unsafeAtomicAdd ---
@@ -803,7 +763,7 @@ if (idx % 100000 == 0 && DEBUG_PRINT) {
         manual_dynamic_reduce_sum_vec3(v_t_local, cid, warp_thread_id, warp_active_mask);
 
         unsigned long long my_cid_mask = 0;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < GSPLAT_WARP_SIZE; ++i) {
             long long lane_cid_temp = __shfl_sync(warp_active_mask, cid, i);
             if ((warp_active_mask & (1ULL << i)) && (lane_cid_temp == cid)) {
                 my_cid_mask |= (1ULL << i);
