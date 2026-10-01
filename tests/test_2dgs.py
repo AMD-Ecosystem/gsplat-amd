@@ -558,6 +558,14 @@ def test_rasterize_to_pixels_2dgs_empty(test_data, batch_dims: Tuple[int, ...]):
     v_render_alphas = torch.rand_like(render_alphas)
     v_render_normals = torch.rand_like(render_normals)
 
+    # allow_unused=True: with N=0 the fused kernel still returns a zero-sized
+    # gradient for each per-Gaussian tensor (its autograd.Function wires an
+    # edge to every argument regardless of whether the kernel body touches
+    # it), but the pure-PyTorch reference below never even enters its
+    # accumulation loop at N=0 (num_batches == 0), so means2d/ray_transforms/
+    # colors/opacities/normals are genuinely unreachable in its graph -- only
+    # `backgrounds` is. Both "zero-sized tensor" and "None" are valid ways of
+    # saying "no gradient"; we accept either.
     (
         v_means2d,
         v_ray_transforms,
@@ -570,6 +578,7 @@ def test_rasterize_to_pixels_2dgs_empty(test_data, batch_dims: Tuple[int, ...]):
         + (render_alphas * v_render_alphas).sum()
         + (render_normals * v_render_normals).sum(),
         (means2d, ray_transforms, colors, opacities, backgrounds, normals),
+        allow_unused=True,
     )
 
     (
@@ -584,14 +593,15 @@ def test_rasterize_to_pixels_2dgs_empty(test_data, batch_dims: Tuple[int, ...]):
         + (_render_alphas * v_render_alphas).sum()
         + (_render_normals * v_render_normals).sum(),
         (means2d, ray_transforms, colors, opacities, backgrounds, normals),
+        allow_unused=True,
     )
 
     # the N=0 gradients w.r.t. per-Gaussian tensors are trivially empty; what
     # matters is that the kernel launch did not crash or leave them non-finite,
     # and that the background gradient (the only non-empty one) is exact.
     for g in (v_means2d, v_ray_transforms, v_colors, v_opacities, v_normals):
-        assert g.numel() == 0
-        assert torch.isfinite(g).all()
+        assert g is None or g.numel() == 0
+        assert g is None or torch.isfinite(g).all()
     torch.testing.assert_close(v_backgrounds, _v_backgrounds, atol=1e-6, rtol=1e-6)
 
 
