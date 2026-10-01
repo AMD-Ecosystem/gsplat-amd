@@ -461,6 +461,41 @@ __global__ void spherical_harmonics_bwd_kernel(
     scalar_t *__restrict__ v_coeffs,       // [N, K, 3]
     scalar_t *__restrict__ v_dirs          // [N, 3] optional
 ) {
+#if USE_ROCM
+    // One thread per element covering all three channels, not one per
+    // (element, channel): the SH basis is CSE'd instead of evaluated three
+    // times, and v_dir becomes thread-local so three atomics become stores.
+    // NOTE sh_coeffs_to_color_fast_vjp ASSIGNS to *v_dir, so sum here.
+    uint32_t elem_id = cg::this_grid().thread_rank();
+    if (elem_id >= N) {
+        return;
+    }
+    if (masks != nullptr && !masks[elem_id]) {
+        return;
+    }
+    const vec3 dir = dirs[elem_id];
+    const scalar_t *co = coeffs + elem_id * K * 3;
+    const scalar_t *vc = v_colors + elem_id * 3;
+    scalar_t *vco = v_coeffs + elem_id * K * 3;
+    vec3 v_dir_sum = {0.f, 0.f, 0.f};
+#pragma unroll
+    for (uint32_t c = 0; c < 3; ++c) {
+        vec3 v_dir_c = {0.f, 0.f, 0.f};
+        sh_coeffs_to_color_fast_vjp(
+            degrees_to_use, c, dir, co, vc, vco,
+            v_dirs == nullptr ? nullptr : &v_dir_c
+        );
+        v_dir_sum.x += v_dir_c.x;
+        v_dir_sum.y += v_dir_c.y;
+        v_dir_sum.z += v_dir_c.z;
+    }
+    if (v_dirs != nullptr) {
+        // exactly one thread owns this address now
+        v_dirs[elem_id * 3] = static_cast<scalar_t>(v_dir_sum.x);
+        v_dirs[elem_id * 3 + 1] = static_cast<scalar_t>(v_dir_sum.y);
+        v_dirs[elem_id * 3 + 2] = static_cast<scalar_t>(v_dir_sum.z);
+    }
+#else
     // parallelize over N * 3
     uint32_t idx = cg::this_grid().thread_rank();
     if (idx >= N * 3) {
@@ -487,6 +522,7 @@ __global__ void spherical_harmonics_bwd_kernel(
         unsafeAtomicAdd(v_dirs + elem_id * 3 + 1, v_dir.y);
         unsafeAtomicAdd(v_dirs + elem_id * 3 + 2, v_dir.z);
     }
+#endif
 }
 
 void launch_spherical_harmonics_bwd_kernel(
@@ -503,8 +539,13 @@ void launch_spherical_harmonics_bwd_kernel(
     const uint32_t K = coeffs.size(-2);
     const uint32_t N = dirs.numel() / 3;
 
+#if USE_ROCM
+    // one thread per element, handling all three channels
+    int64_t n_elements = N;
+#else
     // parallelize over N * 3
     int64_t n_elements = N * 3;
+#endif
     dim3 threads(256);
     dim3 grid((n_elements + threads.x - 1) / threads.x);
     int64_t shmem_size = 0; // No shared memory used in this kernel

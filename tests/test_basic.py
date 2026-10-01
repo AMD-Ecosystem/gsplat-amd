@@ -649,7 +649,7 @@ def test_isect_offset_encode_tiny(n_isects: int):
         isect_ids = torch.zeros(0, device=device, dtype=torch.int64)
         # every entry of the [I, tile_height, tile_width] output must be zero
         expected = torch.zeros(
-            (I, tile_height, tile_width), device=device, dtype=torch.int32
+            (I, tile_height, tile_width), device=device, dtype=torch.int64
         )
     else:
         # a single intersection on image 1, tile (x=2, y=1), i.e. not the very
@@ -665,8 +665,8 @@ def test_isect_offset_encode_tiny(n_isects: int):
         # offsets[j] == number of intersections stored before tile j, so it is
         # 0 up to and including the occupied tile and 1 for every tile after it.
         flat_id = image_id * n_tiles + tile_id
-        expected = torch.arange(I * n_tiles, device=device, dtype=torch.int32)
-        expected = (expected > flat_id).to(torch.int32)
+        expected = torch.arange(I * n_tiles, device=device, dtype=torch.int64)
+        expected = (expected > flat_id).to(torch.int64)
         expected = expected.reshape(I, tile_height, tile_width)
 
     isect_offsets = isect_offset_encode(isect_ids, I, tile_width, tile_height)

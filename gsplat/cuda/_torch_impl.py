@@ -103,6 +103,51 @@ def _persp_proj(
     assert covars.shape == batch_dims + (C, N, 3, 3), covars.shape
     assert Ks.shape == batch_dims + (C, 3, 3), Ks.shape
 
+    if torch.version.hip:
+        # Match ROCm C++ depth clamping (Utils.cuh USE_ROCM, near_plane=0)
+        x, y, z = torch.unbind(means, dim=-1)  # [..., C, N]
+        fx = Ks[..., 0, 0, None]
+        fy = Ks[..., 1, 1, None]
+        cx = Ks[..., 0, 2, None]
+        cy = Ks[..., 1, 2, None]
+        tan_fovx = 0.5 * width / fx
+        tan_fovy = 0.5 * height / fy
+        lim_x_pos = (width - cx) / fx + 0.3 * tan_fovx
+        lim_x_neg = cx / fx + 0.3 * tan_fovx
+        lim_y_pos = (height - cy) / fy + 0.3 * tan_fovy
+        lim_y_neg = cy / fy + 0.3 * tan_fovy
+        k_min_depth = 1e-4
+        z_safe = torch.where(
+            torch.abs(z) < k_min_depth,
+            torch.copysign(torch.full_like(z, k_min_depth), z),
+            z,
+        )
+        # Backward: match C++ VJP (gradient flows as if z_safe == z, not through clamp)
+        z_safe = z + (z_safe - z).detach()
+        rz = 1.0 / z_safe
+        rz2 = rz * rz
+        jac_tx = z_safe * torch.clamp(x * rz, min=-lim_x_neg, max=lim_x_pos)
+        jac_ty = z_safe * torch.clamp(y * rz, min=-lim_y_neg, max=lim_y_pos)
+        means2d = torch.stack(
+            [fx * x * rz + cx, fy * y * rz + cy], dim=-1
+        )
+        O = torch.zeros(batch_dims + (C, N), device=means.device, dtype=means.dtype)
+        J = torch.stack(
+            [
+                fx * rz,
+                O,
+                -fx * jac_tx * rz2,
+                O,
+                fy * rz,
+                -fy * jac_ty * rz2,
+            ],
+            dim=-1,
+        ).reshape(batch_dims + (C, N, 2, 3))
+        cov2d = torch.einsum(
+            "...ij,...jk,...kl->...il", J, covars, J.transpose(-1, -2)
+        )
+        return means2d, cov2d
+
     tx, ty, tz = torch.unbind(means, dim=-1)  # [..., C, N]
     tz2 = tz**2  # [..., C, N]
 
