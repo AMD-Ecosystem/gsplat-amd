@@ -181,7 +181,7 @@ Docker is the recommended method to set up your environment, as it avoids potent
                       --name rocm_pytorch \
                       rocm/pytorch:rocm6.4.3_ubuntu22.04_py3.10_pytorch_release_2.6.0
 
-3. After setting up the container, install GSplat from the AMD-hosted PyPI repository:
+3. After setting up the container, you can install GSplat along with all supported dependencies from the AMD-hosted PyPI repository:
 
    .. tab-set::
 
@@ -190,27 +190,27 @@ Docker is the recommended method to set up your environment, as it avoids potent
 
          .. code-block:: bash
 
-            pip install amd_gsplat --extra-index-url=https://pypi.amd.com/rocm-7.0.0/simple/
+            pip install -r https://github.com/AMD-Ecosystem/gsplat/releases/download/1.5.3b2/requirements-gsplat-rocm-7.0.0.txt --require-hashes --index-url https://pypi.org/simple
 
       .. tab-item:: ROCm 6.4.3
          :sync: rocm6
 
          .. code-block:: bash
 
-            pip install amd_gsplat --extra-index-url=https://pypi.amd.com/rocm-6.4.3/simple/
+            pip install -r https://github.com/AMD-Ecosystem/gsplat/releases/download/1.5.3b2/requirements-gsplat-rocm-6.4.3.txt --require-hashes --index-url https://pypi.org/simple
 
 4. Verify the installation:
 
    .. code-block:: bash
 
-      pip show amd_gsplat
+      pip show gsplat
 
 5. The output should show as follows:
 
    .. code-block:: text
 
-      Name: amd_gsplat
-      Version: 1.5.3+30c1e78
+      Name: gsplat
+      Version: 1.5.3+6f2f06e
       Summary: Python package for differentiable rasterization of gaussians
       Home-page: https://github.com/AMD-Ecosystem/gsplat-amd
       Author: AMD Corporation
@@ -288,7 +288,7 @@ Build steps
 
    .. code-block:: bash
 
-      pip install dist/amd_gsplat*.whl
+      pip install dist/gsplat*.whl
 
 5. Verify the installation:
 
@@ -310,7 +310,7 @@ These tests ensure the correctness, performance, and stability of the core featu
       git clone https://github.com/rocm/nerfacc.git
       cd nerfacc
       python setup.py bdist_wheel
-      pip install dist/amd_nerfacc*.whl
+      pip install dist/nerfacc*.whl
 
 2. Run specific tests from the ``tests`` directory:
 
