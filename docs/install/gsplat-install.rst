@@ -294,7 +294,7 @@ Build steps
 
    .. code-block:: bash
 
-      pip show amd_gsplat
+      pip show gsplat
 
 Run unit tests and verify the installation
 ====================================================================
