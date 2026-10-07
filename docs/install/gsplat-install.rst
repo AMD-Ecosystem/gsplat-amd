@@ -307,7 +307,7 @@ These tests ensure the correctness, performance, and stability of the core featu
 
    .. code-block:: bash
 
-      git clone https://github.com/rocm/nerfacc.git
+      git clone https://github.com/AMD-Ecosystem/nerfacc.git
       cd nerfacc
       python setup.py bdist_wheel
       pip install dist/nerfacc*.whl
