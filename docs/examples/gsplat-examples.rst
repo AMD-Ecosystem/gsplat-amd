@@ -14,7 +14,7 @@ A set of examples is available to help you get started with GSplat (Gaussian spl
 
    .. code-block:: bash
 
-      git clone --no-checkout https://github.com/AMD-Ecosystem/gsplat.git
+      git clone --no-checkout https://github.com/AMD-Ecosystem/gsplat-amd.git
       cd gsplat
       git sparse-checkout init --cone
       git sparse-checkout add examples

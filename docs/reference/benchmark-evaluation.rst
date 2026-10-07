@@ -8,7 +8,7 @@
 Benchmarks for GSplat
 ********************************************************************
 
-The `https://github.com/AMD-Ecosystem/gsplat <https://github.com/AMD-Ecosystem/gsplat>`_ repository includes a standalone script that reproduces the 
+The `https://github.com/AMD-Ecosystem/gsplat-amd <https://github.com/AMD-Ecosystem/gsplat-amd>`_ repository includes a standalone script that reproduces the 
 official Gaussian Splatting results with matching performance on PSNR, SSIM, LPIPS, and the converged number of Gaussians.
 
 To run the benchmark:

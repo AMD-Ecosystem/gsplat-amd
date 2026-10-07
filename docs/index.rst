@@ -17,7 +17,7 @@ This ROCm-enabled release of GSplat is built on top of `PyTorch for AMD ROCm
 enabling innovators in computer graphics, machine learning, and 3D vision to leverage GPU acceleration with AMD Instinct™ GPUs.  
 With GSplat, you can build, research, and innovate with Gaussian splatting.
 
-The GSplat public repository is located at `https://github.com/AMD-Ecosystem/gsplat <https://github.com/AMD-Ecosystem/gsplat>`__. 
+The GSplat public repository is located at `https://github.com/AMD-Ecosystem/gsplat-amd <https://github.com/AMD-Ecosystem/gsplat-amd>`__. 
 
 .. grid:: 2
   :gutter: 3
