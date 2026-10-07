@@ -12,7 +12,21 @@ flavor defines the site header display, select the flavor for the corresponding 
 flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
 '''
 html_theme = "rocm_docs_theme"
-html_theme_options = {"flavor": "rocm-simulation", "repository_url": "https://github.com/AMD-Ecosystem/gsplat/"}
+html_theme_options = {
+    "flavor": "rocm-simulation",
+    "repository_url": "https://github.com/AMD-Ecosystem/gsplat-amd",
+    "repository_branch": "docs/25.10",
+    "path_to_docs": "docs",
+    "use_repository_button": True,
+    "use_issues_button": True,
+    "use_source_button": True,
+    "use_download_button": True,
+}
+# Publish the llms.txt index at the docs site root and let
+# rocm-docs-core generate llms-full.txt after each build (the llms.txt standard,
+# https://llmstxt.org/). See the rocm-docs-core guide:
+# https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/user_guide/llms.html
+rocm_docs_generate_llms = True
 
 '''
 docs_header_version is used to manually configure the version in the header. If

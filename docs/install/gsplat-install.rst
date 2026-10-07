@@ -14,7 +14,7 @@ This topic provides instructions for installing GSplat, a component that is part
 System requirements
 ====================================================================
 
-To use GSplat (Gaussian splatting) `1.5.3b1 <https://github.com/AMD-Ecosystem/gsplat/tree/release/1.5.3b1>`__, you need the following prerequisites:
+To use GSplat (Gaussian splatting) `1.5.3b1 <https://github.com/AMD-Ecosystem/gsplat-amd/tree/release/1.5.3b1>`__, you need the following prerequisites:
 
 - **ROCm version**: `6.4.3 <https://repo.radeon.com/rocm/apt/6.4.3/>`__ (recommended)
 - **Operating system:** Ubuntu 24.04
@@ -53,26 +53,26 @@ Docker is the recommended method to set up your environment, as it avoids potent
         --group-add video -it -v $HOME:$HOME --name rocm_pytorch 
         rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0
 
-3. After setting up the container, install GSplat from the AMD-hosted `PyPI repository <https://pypi.amd.com/simple/>`__:
+3. After setting up the container, you can install GSplat along with all supported dependencies from the AMD-hosted PyPI repository:
 
    .. code-block:: bash
 
-      pip install amd_gsplat --extra-index-url=https://pypi.amd.com/rocm-6.4.3/simple/
+      pip install -r https://github.com/AMD-Ecosystem/gsplat/releases/download/1.5.3b2/requirements-gsplat-rocm-6.4.3.txt --require-hashes --index-url https://pypi.org/simple
 
 4. Verify the installation:
 
    .. code-block:: bash
 
-      pip show amd_gsplat
+      pip show gsplat
 
 5. The output should show as follows:
 
    .. code-block:: text
 
-      Name: amd_gsplat
-      Version: 1.5.3+4ae1c82
+      Name: gsplat
+      Version: 1.5.3+6f2f06e
       Summary: Python package for differentiable rasterization of Gaussians
-      Home-page: https://github.com/AMD-Ecosystem/gsplat
+      Home-page: https://github.com/AMD-Ecosystem/gsplat-amd
       Author: AMD Corporation
       License: Apache 2.0
       Location: /opt/conda/envs/py_3.12/lib/python3.12/site-packages
@@ -126,7 +126,7 @@ Build steps
 
    .. code-block:: bash
 
-      git clone --recurse-submodules https://github.com/AMD-Ecosystem/gsplat.git
+      git clone --recurse-submodules https://github.com/AMD-Ecosystem/gsplat-amd.git
 
 2. Install the GLM dependency:
 
@@ -152,7 +152,7 @@ Build steps
 
    .. code-block:: bash
 
-      pip install dist/amd_gsplat*.whl
+      pip install dist/gsplat*.whl
 
 5. Verify the installation:
 
@@ -171,10 +171,10 @@ These tests ensure the correctness, performance, and stability of the core featu
 
    .. code-block:: bash
 
-      git clone https://github.com/rocm/nerfacc.git
+      git clone https://github.com/AMD-Ecosystem/nerfacc.git
       cd nerfacc
       python setup.py bdist_wheel
-      pip install dist/amd_nerfacc*.whl
+      pip install dist/nerfacc*.whl
 
 2. Run specific tests from the ``tests`` directory:
 
@@ -193,7 +193,7 @@ A set of examples is available to help you get started. See :doc:`Run a GSplat e
 Benchmarking and evaluation
 ====================================================================
 
-The `https://github.com/AMD-Ecosystem/gsplat <https://github.com/AMD-Ecosystem/gsplat>`_ repository includes a standalone script that reproduces the 
+The `https://github.com/AMD-Ecosystem/gsplat-amd <https://github.com/AMD-Ecosystem/gsplat-amd>`_ repository includes a standalone script that reproduces the 
 official Gaussian Splatting results with matching performance on ``PSNR``, ``SSIM``, ``LPIPS``, and the converged number of Gaussians.
 See :doc:`benchmarks <../reference/benchmark-evaluation>` for more details.
 
