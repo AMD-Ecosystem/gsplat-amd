@@ -18,6 +18,7 @@
 #include <hipcub/hipcub.hpp>
 #include <hipcub/block/block_reduce.hpp>
 #include <rocprim/warp/warp_reduce.hpp>
+#include <ATen/hip/impl/HIPCachingAllocatorMasqueradingAsCUDA.h>
 #endif
 
 namespace gsplat {

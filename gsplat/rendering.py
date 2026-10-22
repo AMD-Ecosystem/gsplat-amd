@@ -628,7 +628,7 @@ def rasterization(
     else:  # RGB
         pass
 
-    # Identify intersecting tiles
+    # Identify intersecting tiles (square tiles of tile_size pixels).
     tile_width = math.ceil(width / float(tile_size))
     tile_height = math.ceil(height / float(tile_size))
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(

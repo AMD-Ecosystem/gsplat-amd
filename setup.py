@@ -8,8 +8,9 @@ import re
 
 from setuptools import find_packages, setup
 
+# Please run the rock_setup.sh script to set the environment variables for the ROCm SDK
 IS_ROCM = True
-ROCM_HOME = "/opt/rocm"
+ROCM_HOME = os.getenv("ROCM_PATH", "/opt/rocm")
 import torch
 
 __version__ = None
@@ -19,10 +20,17 @@ import subprocess
 def get_rocm_arch():
     """
     Runs rocminfo and extracts the GPU architecture (gfx code).
-    
     Returns:
         str: The gfx code (e.g., 'gfx942', 'gfx90a'), or 'gfx942' as fallback.
     """
+    # Explicit override. rocminfo needs a working /dev/kfd, so on a build host
+    # with no (or a temporarily unavailable) GPU the detection below silently
+    # falls back to gfx942 -- which builds wave64 kernels that will never run on
+    # a wave32 part. Set GSPLAT_GPU_ARCH=gfx1250 to pin it.
+    env_arch = os.environ.get("GSPLAT_GPU_ARCH", "").strip()
+    if env_arch:
+        print(f"GSPLAT_GPU_ARCH override: {env_arch}")
+        return env_arch
     try:
         # Run rocminfo command
         result = subprocess.run(
@@ -30,29 +38,24 @@ def get_rocm_arch():
             capture_output=True,
             text=True,
             check=True
-        )
-        
+        ) 
         # Parse the output to find the gfx architecture
         # Look for lines like "Name:                    gfx942"
         output = result.stdout
-        
         # Search for gfx code pattern
         match = re.search(r'Name:\s+(gfx[0-9a-z]+)', output)
         if match:
             gfx_code = match.group(1)
             print(f"Detected ROCm GPU architecture: {gfx_code}")
             return gfx_code
-        
         # Alternative pattern: sometimes it appears as "gfxXXX" directly
         match = re.search(r'\b(gfx[0-9a-z]+)\b', output)
         if match:
             gfx_code = match.group(1)
             print(f"Detected ROCm GPU architecture: {gfx_code}")
             return gfx_code
-            
         print("Warning: Could not detect GPU architecture from rocminfo, using default gfx942")
         return "gfx942"
-        
     except subprocess.CalledProcessError as e:
         print(f"Error running rocminfo: {e}")
         print("Using default architecture: gfx942")
@@ -179,47 +182,80 @@ def get_extensions():
         # Get the GPU architecture dynamically
         gpu_arch = get_rocm_arch()
         print(f"gpu arch is set to {gpu_arch}")
-        conda_prefix = os.getenv("CONDA_PREFIX")
-        conda_lib_path = f"{conda_prefix}/lib"
-        conda_pip_packages = f"{conda_lib_path}/python3.11/site-packages"
 
         # Use relative path instead of hardcoded absolute path
         extensions_dir = osp.join("gsplat","cuda")
         sources = glob.glob(osp.join(extensions_dir, "csrc", "*.cu")) + glob.glob(osp.join(extensions_dir, "csrc", "*.cpp"))
         sources += [osp.join(extensions_dir, "ext.cpp")]
+        # Wavefront width: CDNA (gfx9xx, e.g. MI2xx/MI3xx) is wave64; RDNA and
+        # CDNA5 (gfx10xx/11xx/12xx, e.g. gfx1250 / MI400) are wave32. gsplat's
+        # reduction kernels are templated on this via GSPLAT_WARP_SIZE; pass it
+        # to BOTH host and device compilation so launcher shmem sizing and the
+        # in-kernel reductions agree.
+        _arch_num = "".join(ch for ch in gpu_arch[3:] if ch.isdigit())
+        gsplat_warp_size = 32 if _arch_num[:2] in ("10", "11", "12") else 64
+        print(f"gsplat warp size set to {gsplat_warp_size} (for {gpu_arch})")
 
         undef_macros = []
         define_macros = []
 
-        extra_compile_args = {"cxx": ["-D__HIP_PLATFORM_AMD__" , "-Wno-sign-compare", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM"]}
+        extra_compile_args = {"cxx": ["-D__HIP_PLATFORM_AMD__", "-Wno-sign-compare", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"]}
         if WITH_SYMBOLS:
             extra_compile_args["cxx"] += ["-g", "-O0"]
         else:
-            extra_compile_args = {"cxx": ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment"]}
+            extra_compile_args["cxx"] += ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment"]
 
-        extra_link_args = ["-s"]
+        # Normally strip symbols (-s). When inspecting kernel resource usage,
+        # keep symbols so the code object can be read back after the build.
+        extra_link_args = [] if os.getenv("KERNEL_RESOURCE_USAGE", "0") == "1" else ["-s"]
 
         # Compile with OpenMP
         extra_compile_args["cxx"] += ["-DAT_PARALLEL_OPENMP"]
         extra_compile_args["cxx"] += ["-fopenmp"]
 
-        hipcc_flags = [ "-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM" , f"--offload-arch={gpu_arch}"]
+        # Keep host (launcher) compilation in sync with the device warp width.
+        extra_compile_args["cxx"] += [f"-DGSPLAT_WARP_SIZE={gsplat_warp_size}"]
+
+        hipcc_flags = ["-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", f"--offload-arch={gpu_arch}", f"-DGSPLAT_WARP_SIZE={gsplat_warp_size}"]
+        # Emit hardware floating-point global/LDS atomics (global_atomic_add_f32)
+        # instead of slow compare-and-swap (CAS) loops. The 3DGS backward is
+        # dominated by gradient atomicAdds; on wave32 (gfx1250) the atomic count
+        # is already doubled vs wave64, so fast HW atomics matter even more.
+        hipcc_flags += ["-munsafe-fp-atomics"]
+        # Match the CUDA path, which has always built with nvcc --use_fast_math
+        # (see the nvcc_flags below). The HIP port never carried that across, so
+        # a plain `1.0f / x` compiles to the ~12-instruction IEEE division
+        # sequence (v_div_scale/v_div_fmas/v_div_fixup) instead of a single
+        # v_rcp_f32. In the 3DGS backward that sequence sits on the critical
+        # path of every gaussian, twice per lane. Set FAST_MATH=0 to A/B it.
+        if os.getenv("FAST_MATH", "1") != "0":
+            hipcc_flags += ["-ffast-math"]
+        # Opt-in: print per-kernel VGPR/SGPR/spill/LDS/occupancy at compile time.
+        # Build with KERNEL_RESOURCE_USAGE=1 and read the remarks in the build log.
+        if os.getenv("KERNEL_RESOURCE_USAGE", "0") == "1":
+            hipcc_flags += ["-Rpass-analysis=kernel-resource-usage"]
         if WITH_SYMBOLS:
             hipcc_flags += ["-g", "-ggdb" , "-O0"]
         else:
             hipcc_flags += ["-O3" ]
+        # Opt-in: dump per-arch intermediate files (.s/.bc/.ll) next to the
+        # object files so the generated ISA can be inspected. Build with
+        # SAVE_TEMPS=1 and look for *-hip-amdgcn-amd-amdhsa-<arch>.s.
+        if os.getenv("SAVE_TEMPS", "0") == "1":
+            hipcc_flags += ["--save-temps=obj"]
+        # Generic extra defines, e.g. GSPLAT_EXTRA_DEFINES="GSPLAT_ATOMIC_CEILING GSPLAT_OPT2"
+        for _d in os.getenv("GSPLAT_EXTRA_DEFINES", "").split():
+            extra_compile_args["cxx"] += ["-D" + _d]
+            hipcc_flags += ["-D" + _d]
         if LINE_INFO:
             hipcc_flags += ["-gline-tables-only"]
+        define_macros += [("USE_ROCM", "1")]
         if torch.version.hip:
-            # USE_ROCM was added to later versions of PyTorch.
-            # Define here to support older PyTorch versions as well:
-            define_macros += [("USE_ROCM", "1")]
             undef_macros += ["__HIP_NO_HALF_CONVERSIONS__"]
         if ENABLE_TEST_COVERAGE:
             extra_compile_args['cxx'] += ['-fprofile-instr-generate', '-fcoverage-mapping', '-Qunused-arguments', '--gcc-toolchain=/usr']
             hipcc_flags += ['-fprofile-instr-generate', '-fcoverage-mapping']
             extra_link_args += ['-fprofile-instr-generate']
-	
 	# Its still nvcc flags that are used for HIP compilation
         extra_compile_args["nvcc"] = hipcc_flags
         current_dir = pathlib.Path(__file__).parent.resolve()
@@ -227,9 +263,8 @@ def get_extensions():
         include_dirs = [
             osp.join(current_dir, "gsplat", "cuda", "include"),
             f"{os.environ['HOME']}/.local/include",
-            f"/opt/conda/include",
-            f"/opt/conda/envs/py_3.12/lib/python3.12/site-packages/",
-            f"/opt/rocm/include",
+            f"{os.environ['ROCM_PATH']}/include",
+            f"{os.environ['CPLUS_INCLUDE_PATH']}"
         ]
 
         extension = CUDAExtension(
@@ -356,7 +391,6 @@ setup(
             "pytest-xdist==2.5.0",
             "typeguard>=2.13.3",
             "pyyaml==6.0",
-            "build",
             "twine",
         ],
     },
