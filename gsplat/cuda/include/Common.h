@@ -12,6 +12,7 @@
 #else
 #include <c10/hip/HIPStream.h> // at::hip::getCurrentHIPStream
 #include <c10/hip/HIPCachingAllocator.h>
+#include <ATen/hip/impl/HIPCachingAllocatorMasqueradingAsCUDA.h>
 #include <c10/hip/HIPStream.h>
 #include <c10/hip/HIPGuard.h>
 #include <c10/core/DeviceGuard.h>
