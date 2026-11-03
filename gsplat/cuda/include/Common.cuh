@@ -38,7 +38,11 @@ namespace gsplat {
     do {                                                                       \
         size_t temp_storage_bytes = 0;                                         \
         auto res = func(nullptr, temp_storage_bytes, __VA_ARGS__);                        \
-        auto &caching_allocator = *::c10::hip::HIPCachingAllocator::get();   \
+        /* c10::hip::HIPCachingAllocator was folded into                     \
+           c10::cuda::CUDACachingAllocator in newer PyTorch ROCm builds; the  \
+           masquerading allocator exists in both */                           \
+        auto &caching_allocator =                                             \
+            *::c10::hip::HIPCachingAllocatorMasqueradingAsCUDA::get();        \
         auto temp_storage = caching_allocator.allocate(temp_storage_bytes);    \
         res = func(temp_storage.get(), temp_storage_bytes, __VA_ARGS__);  \
 	assert(res == hipSuccess);                                            \
